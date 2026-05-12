@@ -3,6 +3,12 @@ import threading
 import subprocess
 import time
 import os
+import queue
+import sys
+
+server_logs = queue.Queue()
+
+DEBUG = "--debug" in sys.argv
 
 SERVER = "../build/practice/epoll_echo_server"
 
@@ -14,6 +20,30 @@ MESSAGES = 20
 
 server_proc = None
 
+SOCKET_TIMEOUT = 3
+
+def log_reader(pipe):
+    while True:
+        line = pipe.readline()
+
+        if not line:
+            break
+
+        line = line.rstrip()
+
+        server_logs.put(line)
+
+        if DEBUG:
+            print(f"[SERVER] {line}")
+def dump_server_logs():
+    print()
+    print("------ SERVER LOG BEGIN ------")
+
+    while not server_logs.empty():
+        print(server_logs.get())
+
+    print("------- SERVER LOG END -------")
+    print()
 
 def start_server(mode):
     global server_proc
@@ -27,8 +57,15 @@ def start_server(mode):
         [SERVER, mode],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        text=True
+        text=True,
+        bufsize=5
     )
+
+    threading.Thread(
+    target=log_reader,
+    args=(server_proc.stdout,),
+    daemon=True
+    ).start()
 
     time.sleep(1)
 
@@ -140,21 +177,41 @@ def large_data_test():
 
 
 def half_packet_test():
-    s = socket.socket()
+    try:
+        s = socket.socket()
 
-    s.connect((HOST, PORT))
+        s.settimeout(3)
 
-    s.sendall(b"hello_")
+        s.connect((HOST, PORT))
 
-    time.sleep(1)
+        s.sendall(b"hello_")
 
-    s.sendall(b"epoll")
+        time.sleep(1)
 
-    data = s.recv(4096)
+        s.sendall(b"epoll")
 
-    s.close()
+        expected = b"hello_epoll"
 
-    return data == b"hello_epoll"
+        recv = b""
+
+        while len(recv) < len(expected):
+            chunk = s.recv(4096)
+
+            if not chunk:
+                break
+
+            recv += chunk
+
+        s.close()
+
+        print("receive:", recv, "send:", expected)
+
+        return recv == expected
+
+    except socket.timeout:
+        print("[TIMEOUT] recv timeout")
+
+        return False
 
 
 def disconnect_test():
@@ -230,7 +287,7 @@ def et_special_test():
 
 
 def run_test(name, fn):
-    print(f"[TEST] {name:<30}", end="")
+    print(f"[TEST] {name:<35}", end="")
 
     try:
         ok = fn()
@@ -239,11 +296,13 @@ def run_test(name, fn):
             print("[PASS]")
         else:
             print("[FAIL]")
+            dump_server_logs()
 
         return ok
 
     except Exception as e:
         print(f"[EXCEPTION] {e}")
+        dump_server_logs()
 
         return False
 
