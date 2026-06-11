@@ -14,6 +14,6 @@ private:
     int create_listen_socket();
     int connect_backend();
 
-    void forwar_data(int from_fd, int to_fd);
+    void forward_data(int from_fd, int to_fd);
     void handle_connection(int client_fd);
 };

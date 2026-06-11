@@ -19,8 +19,20 @@ int TcpProxy::create_listen_socket()
     addr.sin_port = htons(listen_port_);
     addr.sin_addr.s_addr = INADDR_ANY;
 
-    bind(fd, (sockaddr*)&addr, sizeof(addr));
-    listen(fd, 10);
+    if (bind(fd, (sockaddr*)&addr, sizeof(addr)) < 0)
+    {
+        std::cerr << "bind socket failed" << std::endl;
+        close(fd);
+        return -1;
+    }
+
+    const int maxConnection = 20;
+    if (listen(fd, maxConnection) < 0)
+    {
+        std::cerr << "listen socket failed" << std::endl;
+        close(fd);
+        return -1;
+    }
 
     return fd;
 }
@@ -44,7 +56,7 @@ int TcpProxy::connect_backend()
     return fd;
 }
 
-void TcpProxy::forwar_data(int from_fd, int to_fd)
+void TcpProxy::forward_data(int from_fd, int to_fd)
 {
     char buffer[4096];
 
@@ -84,7 +96,7 @@ void TcpProxy::handle_connection(int client_fd)
     if (pid == 0)
     {
         // 子进程: client -> server
-        forwar_data(client_fd, server_fd);
+        forward_data(client_fd, server_fd);
         close(client_fd);
         close(server_fd);
         exit(0);
@@ -92,7 +104,7 @@ void TcpProxy::handle_connection(int client_fd)
     else
     {
         // 父进程：server -> client
-        forwar_data(server_fd, client_fd);
+        forward_data(server_fd, client_fd);
         close(client_fd);
         close(server_fd);
     }
