@@ -1,0 +1,21 @@
+# 隧道公共库
+add_library(tunnel_common STATIC
+    common/logger.cpp
+    common/netutil.cpp
+)
+target_include_directories(tunnel_common PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(tunnel_common PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/common)
+
+# server
+add_executable(tunnel_server
+    server/main.cpp
+    server/tunnel_server.cpp
+)
+target_link_libraries(tunnel_server PRIVATE tunnel_common)
+
+# client
+add_executable(tunnel_client
+    client/main.cpp
+    client/tunnel_client.cpp
+)
+target_link_libraries(tunnel_client PRIVATE tunnel_common)
