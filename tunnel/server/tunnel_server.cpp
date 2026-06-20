@@ -4,6 +4,8 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <ctime>
+#include <vector>
 
 #include "../common/logger.h"
 #include "../common/netutil.h"
@@ -13,6 +15,7 @@ namespace server {
 
 namespace {
 constexpr int kMaxEvents = 1024;
+constexpr int kHeartbeatTimeoutSec = 30;  // 30s 收不到任何消息即判定断线
 }
 
 TunnelServer::TunnelServer(uint16_t control_port)
@@ -34,7 +37,7 @@ bool TunnelServer::Init() {
     }
 
     epoll_event ev{};
-    ev.events = EPOLLIN | EPOLLET;  // ET 模式, 配合非阻塞 accept 循环
+    ev.events = EPOLLIN | EPOLLET;
     ev.data.fd = listen_fd_;
     if (epoll_ctl(epfd_, EPOLL_CTL_ADD, listen_fd_, &ev) < 0) {
         LOG_ERROR("epoll_ctl add listen_fd failed: %s", strerror(errno));
@@ -46,6 +49,13 @@ bool TunnelServer::Init() {
 }
 
 void TunnelServer::Cleanup() {
+    for (auto& kv : sessions_) {
+        if (kv.second && kv.second->fd >= 0) {
+            close(kv.second->fd);
+        }
+    }
+    sessions_.clear();
+
     net::close_fd(listen_fd_);
     if (epfd_ >= 0) {
         close(epfd_);
@@ -57,12 +67,8 @@ void TunnelServer::HandleAccept() {
     for (;;) {
         int fd = accept(listen_fd_, nullptr, nullptr);
         if (fd < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                break;  // ET 模式: 已无新连接
-            }
-            if (errno == EINTR) {
-                continue;
-            }
+            if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+            if (errno == EINTR) continue;
             LOG_ERROR("accept failed: %s", strerror(errno));
             break;
         }
@@ -76,49 +82,134 @@ void TunnelServer::HandleAccept() {
             close(fd);
             continue;
         }
+
+        auto sess = std::make_unique<TunnelSession>();
+        sess->fd = fd;
+        sess->last_recv_heartbeat = time(nullptr);
+        sessions_[fd] = std::move(sess);
         LOG_INFO("new tunnel connection fd=%d from %s", fd,
                  net::peer_to_string(fd).c_str());
     }
 }
 
-void TunnelServer::HandleTunnelReadable(int fd) {
-    // 阶段 0: 仅读取并打印帧类型, 验证收发链路。后续阶段实现具体业务。
-    char buf[4096];
-    ssize_t total = 0;
+void TunnelServer::CloseSession(int fd) {
+    auto it = sessions_.find(fd);
+    if (it == sessions_.end()) {
+        // 可能是已清理过的 fd, 直接从 epoll 移除并关闭
+        epoll_ctl(epfd_, EPOLL_CTL_DEL, fd, nullptr);
+        close(fd);
+        return;
+    }
+    epoll_ctl(epfd_, EPOLL_CTL_DEL, fd, nullptr);
+    close(fd);
+    sessions_.erase(it);
+    LOG_INFO("tunnel fd=%d closed (sessions=%zu)", fd, sessions_.size());
+}
+
+bool TunnelServer::HandleTunnelReadable(int fd) {
+    auto it = sessions_.find(fd);
+    if (it == sessions_.end()) {
+        return false;  // 未知 fd
+    }
+    TunnelSession& sess = *it->second;
+
+    char buf[8192];
     for (;;) {
         ssize_t n = read(fd, buf, sizeof(buf));
         if (n > 0) {
-            total += n;
+            // 喂入帧状态机; 协议错误则断开
+            if (!sess.decoder.Feed(buf, static_cast<size_t>(n))) {
+                LOG_WARN("tunnel fd=%d protocol error (bad frame), closing", fd);
+                CloseSession(fd);
+                return false;
+            }
             continue;
         }
         if (n == 0) {
-            // 对端关闭
             LOG_INFO("tunnel fd=%d closed by peer", fd);
-            epoll_ctl(epfd_, EPOLL_CTL_DEL, fd, nullptr);
-            close(fd);
-            return;
+            CloseSession(fd);
+            return false;
         }
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            break;  // 数据读完
+            break;
         }
         if (errno == EINTR) {
             continue;
         }
         LOG_ERROR("read tunnel fd=%d failed: %s", fd, strerror(errno));
-        epoll_ctl(epfd_, EPOLL_CTL_DEL, fd, nullptr);
-        close(fd);
-        return;
+        CloseSession(fd);
+        return false;
     }
 
-    // 尝试解析至少一个完整帧头, 仅用于打印 (阶段 0 验证)。
-    // 注意: 这里不做粘包/拆包的完整状态机, 留到阶段 1 实现。
-    if (total >= kFrameHeaderLen) {
-        MessageType type{};
-        uint32_t payload_len = 0;
-        if (decode_frame_header(buf, &type, &payload_len)) {
-            LOG_INFO("recv frame fd=%d type=%s payload_len=%u", fd,
-                     msg_type_str(type), payload_len);
+    // 更新心跳时间: 任何收到数据都视为链路活跃
+    sess.last_recv_heartbeat = time(nullptr);
+
+    // 取出完整帧并处理
+    auto frames = sess.decoder.Output();
+    for (const auto& f : frames) {
+        HandleFrame(fd, f);
+        // HandleFrame 可能 CloseSession(fd), 一旦关闭就停止处理后续帧
+        if (sessions_.find(fd) == sessions_.end()) {
+            break;
         }
+    }
+    return true;
+}
+
+void TunnelServer::HandleTunnelWritable(int fd) {
+    auto it = sessions_.find(fd);
+    if (it == sessions_.end()) return;
+    TunnelSession& sess = *it->second;
+    if (sess.writer.Flush(fd)) {
+        // 缓冲已空, 取消可写监听
+        epoll_event ev{};
+        ev.events = EPOLLIN | EPOLLET;
+        ev.data.fd = fd;
+        epoll_ctl(epfd_, EPOLL_CTL_MOD, fd, &ev);
+    }
+}
+
+void TunnelServer::HandleFrame(int fd, const Frame& frame) {
+    switch (frame.type) {
+        case MessageType::HEARTBEAT:
+            // 收到心跳, 回一个心跳 (双向保活)
+            LOG_DEBUG("fd=%d recv HEARTBEAT", fd);
+            {
+                auto it = sessions_.find(fd);
+                if (it != sessions_.end()) {
+                    std::string hb = FrameBuilder(MessageType::HEARTBEAT).Build();
+                    it->second->writer.Append(std::move(hb));
+                    if (!it->second->writer.Flush(fd)) {
+                        // 没写完, 监听可写
+                        epoll_event ev{};
+                        ev.events = EPOLLIN | EPOLLOUT | EPOLLET;
+                        ev.data.fd = fd;
+                        epoll_ctl(epfd_, EPOLL_CTL_MOD, fd, &ev);
+                    }
+                }
+            }
+            break;
+        default:
+            // 阶段 1 暂不处理 REGISTER/PORT_MAP/... , 仅记录
+            LOG_INFO("fd=%d recv %s (payload_len=%zu), not handled yet", fd,
+                     msg_type_str(frame.type), frame.payload.size());
+            break;
+    }
+}
+
+void TunnelServer::CheckHeartbeatTimeout() {
+    time_t now = time(nullptr);
+    // 收集超时的 fd (不能边遍历边 erase)
+    std::vector<int> dead;
+    for (auto& kv : sessions_) {
+        if (now - kv.second->last_recv_heartbeat > kHeartbeatTimeoutSec) {
+            dead.push_back(kv.first);
+        }
+    }
+    for (int fd : dead) {
+        LOG_WARN("tunnel fd=%d heartbeat timeout (>%ds), closing", fd,
+                 kHeartbeatTimeoutSec);
+        CloseSession(fd);
     }
 }
 
@@ -130,9 +221,13 @@ void TunnelServer::Run() {
 
     epoll_event events[kMaxEvents];
     for (;;) {
-        int nready = epoll_wait(epfd_, events, kMaxEvents, -1);
+        // timeout=5000ms: 即使无事件也定期醒来检查心跳超时
+        int nready = epoll_wait(epfd_, events, kMaxEvents, 5000);
         if (nready < 0) {
-            if (errno == EINTR) continue;
+            if (errno == EINTR) {
+                CheckHeartbeatTimeout();
+                continue;
+            }
             LOG_ERROR("epoll_wait failed: %s", strerror(errno));
             break;
         }
@@ -140,16 +235,26 @@ void TunnelServer::Run() {
             int fd = events[i].data.fd;
             if (events[i].events & (EPOLLERR | EPOLLHUP)) {
                 LOG_WARN("epoll error/hup on fd=%d", fd);
-                epoll_ctl(epfd_, EPOLL_CTL_DEL, fd, nullptr);
-                close(fd);
+                if (fd == listen_fd_) {
+                    break;  // listen fd 出错, 致命, 退出主循环
+                }
+                CloseSession(fd);
                 continue;
             }
             if (fd == listen_fd_) {
                 HandleAccept();
-            } else if (events[i].events & EPOLLIN) {
-                HandleTunnelReadable(fd);
+            } else {
+                if (events[i].events & EPOLLIN) {
+                    HandleTunnelReadable(fd);
+                }
+                // readable 之后 fd 可能已关闭, 需复查
+                if (sessions_.count(fd) && (events[i].events & EPOLLOUT)) {
+                    HandleTunnelWritable(fd);
+                }
             }
         }
+        // 每轮事件处理完检查心跳超时
+        CheckHeartbeatTimeout();
     }
 
     Cleanup();

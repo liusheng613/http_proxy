@@ -2,6 +2,8 @@
 add_library(tunnel_common STATIC
     common/logger.cpp
     common/netutil.cpp
+    common/frame.cpp
+    common/write_buffer.cpp
 )
 target_include_directories(tunnel_common PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_include_directories(tunnel_common PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/common)
