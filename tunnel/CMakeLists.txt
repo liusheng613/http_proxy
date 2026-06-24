@@ -12,6 +12,7 @@ target_include_directories(tunnel_common PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/comm
 add_executable(tunnel_server
     server/main.cpp
     server/tunnel_server.cpp
+    server/port_mapper.cpp
 )
 target_link_libraries(tunnel_server PRIVATE tunnel_common)
 
