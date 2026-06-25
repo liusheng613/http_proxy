@@ -8,9 +8,10 @@
 #include "../common/logger.h"
 #include "tunnel_client.h"
 
-// 用法: tunnel_client <server_ip> [server_port] [-L local_port:remote_port] [-d]
+// 用法: tunnel_client <server_ip> [server_port] [-n name] [-L local_port:remote_port] [-d]
 //   server_ip:   公网 server 的 IP
 //   server_port: 控制隧道端口, 默认 7000
+//   -n name:     client 名字 (可选, 用于链路探活路由)
 //   -L: 端口映射 (可多个), 例如 -L 22:10022 表示把本地 22 映射到 server 公网 10022
 //   -d: 开启 DEBUG 日志 (默认 INFO)
 int main(int argc, char** argv) {
@@ -18,8 +19,8 @@ int main(int argc, char** argv) {
 
     if (argc < 2) {
         fprintf(stderr,
-                "usage: %s <server_ip> [server_port] [-L local:remote] [-d]\n"
-                "  example: %s 1.2.3.4 7000 -L 22:10022 -L 8080:18080 -d\n",
+                "usage: %s <server_ip> [server_port] [-n name] [-L local:remote] [-d]\n"
+                "  example: %s 1.2.3.4 7000 -n client_a -L 22:10022 -L 8080:18080 -d\n",
                 argv[0], argv[0]);
         return 1;
     }
@@ -28,10 +29,20 @@ int main(int argc, char** argv) {
     uint16_t server_port = 7000;
     bool got_port = false;
     std::vector<tunnel::client::PortMapping> mappings;
+    std::string name;
 
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "-d") == 0 || std::strcmp(argv[i], "--debug") == 0) {
             tunnel::set_log_level(tunnel::LOG_DEBUG);
+            continue;
+        }
+        if (std::strcmp(argv[i], "-n") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "-n requires argument (client name)\n");
+                return 1;
+            }
+            ++i;
+            name = argv[i];
             continue;
         }
         if (std::strcmp(argv[i], "-L") == 0) {
@@ -71,15 +82,15 @@ int main(int argc, char** argv) {
         }
     }
     if (server_ip.empty()) {
-        fprintf(stderr, "usage: %s <server_ip> [server_port] [-L local:remote] [-d]\n",
+        fprintf(stderr, "usage: %s <server_ip> [server_port] [-n name] [-L local:remote] [-d]\n",
                 argv[0]);
         return 1;
     }
 
-    LOG_INFO("tunnel client starting -> %s:%u (%zu mappings)",
-             server_ip.c_str(), server_port, mappings.size());
+    LOG_INFO("tunnel client starting -> %s:%u (%zu mappings, name='%s')",
+             server_ip.c_str(), server_port, mappings.size(), name.c_str());
 
-    tunnel::client::TunnelClient client(server_ip, server_port, mappings);
+    tunnel::client::TunnelClient client(server_ip, server_port, mappings, name);
     client.Run();
 
     LOG_INFO("tunnel client exit");

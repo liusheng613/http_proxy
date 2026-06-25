@@ -21,9 +21,10 @@ constexpr int kEpollTimeoutMs = 1000;
 }
 
 TunnelClient::TunnelClient(const std::string& server_ip, uint16_t server_port,
-                           const std::vector<PortMapping>& mappings)
+                           const std::vector<PortMapping>& mappings,
+                           const std::string& name)
     : server_ip_(server_ip), server_port_(server_port),
-      mappings_(mappings),
+      mappings_(mappings), name_(name),
       tunnel_fd_(-1), epfd_(-1), connected_(false),
       last_send_heartbeat_(0), last_recv_heartbeat_(0) {}
 
@@ -94,7 +95,10 @@ void TunnelClient::HandleTunnelWritable() {
                  server_port_, tunnel_fd_);
         last_recv_heartbeat_ = time(nullptr);
 
-        // 连接成功, 立即发送端口映射 + 首个心跳
+        // 连接成功, 先注册名字 (如果有), 再发端口映射, 最后发心跳
+        if (!name_.empty()) {
+            SendRegister();
+        }
         SendPortMap();
         SendHeartbeat();
     }
@@ -196,11 +200,74 @@ void TunnelClient::HandleFrame(const Frame& frame) {
             }
             break;
 
+        case MessageType::ACK:
+            // server 对 REGISTER 的应答: { uint8 code; }  0=成功, 1=名字被占用
+            if (frame.payload.size() < 1) {
+                LOG_WARN("ACK payload too short");
+                break;
+            }
+            {
+                uint8_t code = static_cast<uint8_t>(frame.payload[0]);
+                if (code == 0) {
+                    LOG_INFO("REGISTER success (name='%s')", name_.c_str());
+                } else {
+                    LOG_WARN("REGISTER failed: name '%s' already used by another client",
+                             name_.c_str());
+                }
+            }
+            break;
+
+        case MessageType::PROBE:
+            // server 转发来的探活请求 (来自另一个 client): 原 payload 不变
+            // payload: { uint8 target_name_len; char target_name[]; uint32 probe_id; }
+            if (frame.payload.size() < 1) {
+                LOG_WARN("PROBE payload too short");
+                break;
+            }
+            {
+                uint8_t name_len = static_cast<uint8_t>(frame.payload[0]);
+                if (frame.payload.size() < 1 + name_len + 4) {
+                    LOG_WARN("PROBE payload truncated");
+                    break;
+                }
+                // 提取 source_name (即发起方, 这里 payload 没带, 用 target_name 占位)
+                // 实际上 PROBE 的 payload 不包含 source_name, 只有 target_name 和 probe_id
+                uint32_t probe_id = ntohl(*reinterpret_cast<const uint32_t*>(
+                    &frame.payload[1 + name_len]));
+                HandleProbe(probe_id, "");  // source_name 暂不需要
+            }
+            break;
+
+        case MessageType::PROBE_REPLY:
+            // server 转发回来的探活应答: { uint32 probe_id; uint8 status; }
+            if (frame.payload.size() < 5) {
+                LOG_WARN("PROBE_REPLY payload too short");
+                break;
+            }
+            {
+                uint32_t probe_id = ntohl(*reinterpret_cast<const uint32_t*>(&frame.payload[0]));
+                uint8_t status = static_cast<uint8_t>(frame.payload[4]);
+                HandleProbeReply(probe_id, status);
+            }
+            break;
+
         default:
             LOG_INFO("recv %s (payload_len=%zu), not handled",
                      msg_type_str(frame.type), frame.payload.size());
             break;
     }
+}
+
+void TunnelClient::SendRegister() {
+    if (name_.empty()) return;
+    // payload: { uint8 name_len; char name[name_len]; }
+    FrameBuilder builder(MessageType::REGISTER);
+    builder.AppendU8(static_cast<uint8_t>(name_.size()));
+    builder.AppendStr(name_);
+    std::string frame = builder.Build();
+    writer_.Append(std::move(frame));
+    writer_.Flush(tunnel_fd_);
+    LOG_INFO("sent REGISTER (name='%s')", name_.c_str());
 }
 
 void TunnelClient::SendPortMap() {
@@ -348,12 +415,46 @@ void TunnelClient::SendHeartbeat() {
     LOG_DEBUG("send HEARTBEAT");
 }
 
+void TunnelClient::SendProbe(const std::string& target_name, uint32_t probe_id) {
+    if (!connected_) return;
+    // payload: { uint8 target_name_len; char target_name[]; uint32 probe_id; }
+    FrameBuilder builder(MessageType::PROBE);
+    builder.AppendU8(static_cast<uint8_t>(target_name.size()));
+    builder.AppendStr(target_name);
+    builder.AppendU32(probe_id);
+    std::string frame = builder.Build();
+    writer_.Append(std::move(frame));
+    writer_.Flush(tunnel_fd_);
+    LOG_INFO("sent PROBE to '%s' (probe_id=%u)", target_name.c_str(), probe_id);
+}
+
 void TunnelClient::CheckHeartbeatTimeout() {
     if (!connected_) return;
     time_t now = time(nullptr);
     if (now - last_recv_heartbeat_ > kHeartbeatTimeoutSec) {
         LOG_WARN("heartbeat timeout (>%ds), reconnecting", kHeartbeatTimeoutSec);
         Disconnect();
+    }
+}
+
+void TunnelClient::HandleProbe(uint32_t probe_id, const std::string& source_name) {
+    // 收到探活请求, 回复 PROBE_REPLY
+    // payload: { uint32 probe_id; uint8 status; }  status=0 表示在线
+    FrameBuilder builder(MessageType::PROBE_REPLY);
+    builder.AppendU32(probe_id);
+    builder.AppendU8(0);  // status=0, 表示在线
+    std::string frame = builder.Build();
+    writer_.Append(std::move(frame));
+    writer_.Flush(tunnel_fd_);
+    LOG_INFO("recv PROBE (probe_id=%u), replied PROBE_REPLY", probe_id);
+}
+
+void TunnelClient::HandleProbeReply(uint32_t probe_id, uint8_t status) {
+    // 收到探活应答
+    if (status == 0) {
+        LOG_INFO("PROBE_REPLY: probe_id=%u, target is online", probe_id);
+    } else {
+        LOG_WARN("PROBE_REPLY: probe_id=%u, target not found", probe_id);
     }
 }
 

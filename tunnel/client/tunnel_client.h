@@ -20,10 +20,12 @@ using PortMapping = std::pair<uint16_t, uint16_t>;
 // 内网客户端: 主动连公网 server, 建立控制隧道。
 //
 // 阶段 2: 连接成功后发 PORT_MAP, 收 NEW_CONN 连本地服务, DATA 双向转发。
+// 阶段 3: 支持 client 名字 (REGISTER), 链路探活 (PROBE/PROBE_REPLY)。
 class TunnelClient {
 public:
     TunnelClient(const std::string& server_ip, uint16_t server_port,
-                 const std::vector<PortMapping>& mappings);
+                 const std::vector<PortMapping>& mappings,
+                 const std::string& name = "");
     ~TunnelClient();
 
     TunnelClient(const TunnelClient&) = delete;
@@ -45,11 +47,18 @@ private:
     // 帧处理
     void HandleFrame(const Frame& frame);
 
-    // 连接成功后发 PORT_MAP
+    // 连接成功后发 REGISTER + PORT_MAP
+    void SendRegister();
     void SendPortMap();
 
     // 收到 NEW_CONN: 连接本地服务, 加入 epoll。
     void HandleNewConn(uint32_t session_id, uint16_t local_port);
+
+    // 收到 PROBE: 回应 PROBE_REPLY
+    void HandleProbe(uint32_t probe_id, const std::string& source_name);
+
+    // 收到 PROBE_REPLY: 打印结果
+    void HandleProbeReply(uint32_t probe_id, uint8_t status);
 
     // 关闭一个本地会话, 通知 server CLOSE。
     void CloseLocal(uint32_t session_id);
@@ -57,9 +66,13 @@ private:
     void SendHeartbeat();
     void CheckHeartbeatTimeout();
 
+    // 发送探活请求到目标 client (可选功能, 用于测试)
+    void SendProbe(const std::string& target_name, uint32_t probe_id);
+
     std::string server_ip_;
     uint16_t    server_port_;
     std::vector<PortMapping> mappings_;
+    std::string name_;  // client 名字 (可选, 用于 PROBE 路由)
 
     int tunnel_fd_;
     int epfd_;

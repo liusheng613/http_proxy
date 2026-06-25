@@ -111,6 +111,11 @@ void TunnelServer::CloseSession(int fd) {
         CloseUser(ufd);
     }
 
+    // 清理 name 映射
+    if (!it->second->name.empty()) {
+        name_to_tunnel_.erase(it->second->name);
+    }
+
     epoll_ctl(epfd_, EPOLL_CTL_DEL, fd, nullptr);
     close(fd);
     sessions_.erase(it);
@@ -252,6 +257,48 @@ void TunnelServer::HandleFrame(int fd, const Frame& frame) {
             }
             break;
 
+        case MessageType::REGISTER:
+            // client 注册名字: { uint8 name_len; char name[name_len]; }
+            if (frame.payload.size() < 1) {
+                LOG_WARN("REGISTER payload too short");
+                break;
+            }
+            {
+                uint8_t name_len = static_cast<uint8_t>(frame.payload[0]);
+                if (frame.payload.size() < 1 + name_len) {
+                    LOG_WARN("REGISTER payload truncated");
+                    break;
+                }
+                std::string name = frame.payload.substr(1, name_len);
+                // 检查名字是否已被占用
+                auto nit = name_to_tunnel_.find(name);
+                if (nit != name_to_tunnel_.end() && nit->second != fd) {
+                    LOG_WARN("fd=%d REGISTER name='%s' already used by fd=%d, reject",
+                             fd, name.c_str(), nit->second);
+                    // 发 ACK(失败) 给 client
+                    std::string ack = FrameBuilder(MessageType::ACK)
+                                          .AppendU8(1)  // code=1 表示失败
+                                          .Build();
+                    sess.writer.Append(std::move(ack));
+                    sess.writer.Flush(fd);
+                    break;
+                }
+                // 如果该 fd 之前有旧名字,先清理
+                if (!sess.name.empty()) {
+                    name_to_tunnel_.erase(sess.name);
+                }
+                sess.name = name;
+                name_to_tunnel_[name] = fd;
+                LOG_INFO("fd=%d REGISTER name='%s'", fd, name.c_str());
+                // 发 ACK(成功) 给 client
+                std::string ack = FrameBuilder(MessageType::ACK)
+                                      .AppendU8(0)  // code=0 表示成功
+                                      .Build();
+                sess.writer.Append(std::move(ack));
+                sess.writer.Flush(fd);
+            }
+            break;
+
         case MessageType::PORT_MAP:
             LOG_INFO("fd=%d recv PORT_MAP (payload_len=%zu)", fd, frame.payload.size());
             sess.mapper.HandlePortMap(frame.payload);
@@ -296,7 +343,7 @@ void TunnelServer::HandleFrame(int fd, const Frame& frame) {
             break;
 
         case MessageType::CLOSE:
-            // client 通知关闭某 session
+            // client 通知关闭某 session (外部用户断开)
             if (frame.payload.size() < 4) break;
             {
                 uint32_t sid = ntohl(*reinterpret_cast<const uint32_t*>(&frame.payload[0]));
@@ -305,6 +352,72 @@ void TunnelServer::HandleFrame(int fd, const Frame& frame) {
                     CloseUser(user_fd);
                 }
                 sess.mapper.RemoveSession(sid);
+            }
+            break;
+
+        case MessageType::PROBE:
+            // client A 想探测 client B: { uint8 target_name_len; char target_name[]; uint32 probe_id; }
+            if (frame.payload.size() < 1) {
+                LOG_WARN("PROBE payload too short");
+                break;
+            }
+            {
+                uint8_t name_len = static_cast<uint8_t>(frame.payload[0]);
+                if (frame.payload.size() < 1 + name_len + 4) {
+                    LOG_WARN("PROBE payload truncated");
+                    break;
+                }
+                std::string target_name = frame.payload.substr(1, name_len);
+                uint32_t probe_id = ntohl(*reinterpret_cast<const uint32_t*>(&frame.payload[1 + name_len]));
+                
+                auto tit = name_to_tunnel_.find(target_name);
+                if (tit == name_to_tunnel_.end()) {
+                    // 目标不存在,直接回 PROBE_REPLY(not_found) 给源 client
+                    LOG_INFO("PROBE: target '%s' not found, reply to fd=%d", target_name.c_str(), fd);
+                    std::string reply = FrameBuilder(MessageType::PROBE_REPLY)
+                                            .AppendU32(probe_id)
+                                            .AppendU8(1)  // status=1 not_found
+                                            .Build();
+                    sess.writer.Append(std::move(reply));
+                    sess.writer.Flush(fd);
+                } else {
+                    // 转发 PROBE 给目标 client
+                    int target_fd = tit->second;
+                    LOG_INFO("PROBE: fd=%d -> target '%s' (fd=%d), probe_id=%u",
+                             fd, target_name.c_str(), target_fd, probe_id);
+                    auto target_it = sessions_.find(target_fd);
+                    if (target_it != sessions_.end()) {
+                        std::string probe_frame = FrameBuilder(MessageType::PROBE)
+                                                      .AppendBytes(frame.payload.data(),
+                                                                   frame.payload.size())
+                                                      .Build();
+                        target_it->second->writer.Append(std::move(probe_frame));
+                        target_it->second->writer.Flush(target_fd);
+                    }
+                }
+            }
+            break;
+
+        case MessageType::PROBE_REPLY:
+            // client B 回应 PROBE: { uint32 probe_id; uint8 status; }
+            // 这里简化处理: server 不记录 probe_id 到源 client 的映射,
+            // 而是让 client 在 PROBE payload 里带上自己的 fd 信息 (TODO: 后续优化)
+            // 当前实现: server 收到 PROBE_REPLY 后, 广播给所有 client (除了源)
+            if (frame.payload.size() < 5) {
+                LOG_WARN("PROBE_REPLY payload too short");
+                break;
+            }
+            {
+                std::string reply_frame = FrameBuilder(MessageType::PROBE_REPLY)
+                                              .AppendBytes(frame.payload.data(),
+                                                           frame.payload.size())
+                                              .Build();
+                for (auto& kv : sessions_) {
+                    if (kv.first != fd) {
+                        kv.second->writer.Append(reply_frame);
+                        kv.second->writer.Flush(kv.first);
+                    }
+                }
             }
             break;
 

@@ -20,6 +20,7 @@ struct TunnelSession {
     FrameDecoder decoder;
     WriteBuffer  writer;
     time_t last_recv_heartbeat = 0;
+    std::string name;  // client 注册的名字 (REGISTER 后填充)
     PortMapper mapper;  // 该 client 注册的端口映射
 
     // 按 session_id 查找该 tunnel 的 mapper 中的 user_fd。
@@ -81,6 +82,12 @@ private:
 
     // 快速查找: user_fd -> tunnel_fd (跨 session 定位)
     std::unordered_map<int, int> user_to_tunnel_;
+
+    // client 名字 -> tunnel_fd (用于 PROBE 路由)
+    std::unordered_map<std::string, int> name_to_tunnel_;
+
+    // 全局 remote_port 占用表: remote_port -> tunnel_fd (端口冲突检测)
+    std::unordered_map<uint16_t, int> port_owners_;
 };
 
 }  // namespace server

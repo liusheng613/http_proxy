@@ -37,7 +37,7 @@ enum class MessageType : uint8_t {
     HEARTBEAT = 0x01,
 
     // 注册: client 上线时上报自己的名字, 供其它 client 路由访问。
-    //   payload: { uint16 name_len; char name[name_len]; }
+    //   payload: { uint8 name_len; char name[name_len]; }
     REGISTER = 0x02,
 
     // 端口映射上报: client 告知 server "我暴露了哪些本地端口"。
@@ -62,6 +62,16 @@ enum class MessageType : uint8_t {
 
     // 通用应答 (成功/失败)。payload { uint8 code; }
     ACK = 0x07,
+
+    // 链路探活请求: client A 想检测是否能到 client B。
+    //   方向: client A -> server -> client B
+    //   payload: { uint8 target_name_len; char target_name[]; uint32 probe_id; }
+    PROBE = 0x08,
+
+    // 链路探活应答: client B 回应 client A 的探活请求。
+    //   方向: client B -> server -> client A
+    //   payload: { uint32 probe_id; uint8 status; }  // status: 0=ok, 1=not_found
+    PROBE_REPLY = 0x09,
 };
 
 inline const char* msg_type_str(MessageType t) {
@@ -73,6 +83,8 @@ inline const char* msg_type_str(MessageType t) {
         case MessageType::DATA:      return "DATA";
         case MessageType::CLOSE:     return "CLOSE";
         case MessageType::ACK:       return "ACK";
+        case MessageType::PROBE:     return "PROBE";
+        case MessageType::PROBE_REPLY: return "PROBE_REPLY";
     }
     return "UNKNOWN";
 }
