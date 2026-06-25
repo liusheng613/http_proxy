@@ -116,6 +116,17 @@ void TunnelServer::CloseSession(int fd) {
         name_to_tunnel_.erase(it->second->name);
     }
 
+    // 清理涉及此隧道的所有 relay session
+    std::vector<uint32_t> dead_relays;
+    for (auto& kv : relay_sessions_) {
+        if (kv.second.tunnel_a == fd || kv.second.tunnel_b == fd) {
+            dead_relays.push_back(kv.first);
+        }
+    }
+    for (uint32_t sid : dead_relays) {
+        relay_sessions_.erase(sid);
+    }
+
     epoll_ctl(epfd_, EPOLL_CTL_DEL, fd, nullptr);
     close(fd);
     sessions_.erase(it);
@@ -304,6 +315,52 @@ void TunnelServer::HandleFrame(int fd, const Frame& frame) {
             sess.mapper.HandlePortMap(frame.payload);
             break;
 
+        case MessageType::NEW_CONN:
+            // 可能来自外部用户 (PortMapper 处理) 或来自 client 的组网请求
+            // client->server: payload { session_id=0; target_name_len; target_name[]; target_port }
+            if (frame.payload.size() < 1) break;
+            {
+                uint32_t req_sid = ntohl(*reinterpret_cast<const uint32_t*>(&frame.payload[0]));
+                if (req_sid == 0 && frame.payload.size() >= 8) {
+                    // client 间组网: session_id=0, 后面是目标名+端口
+                    uint16_t name_len = ntohs(*reinterpret_cast<const uint16_t*>(&frame.payload[4]));
+                    if (frame.payload.size() < 6 + name_len + 2) break;
+                    std::string target_name = frame.payload.substr(6, name_len);
+                    uint16_t target_port = ntohs(*reinterpret_cast<const uint16_t*>(&frame.payload[6 + name_len]));
+                    
+                    auto tit = name_to_tunnel_.find(target_name);
+                    if (tit == name_to_tunnel_.end()) {
+                        LOG_WARN("NEW_CONN relay: target '%s' not found", target_name.c_str());
+                        break;
+                    }
+                    int target_fd = tit->second;
+                    if (!sessions_.count(target_fd)) break;
+
+                    uint32_t sid = alloc_session_id();
+                    relay_sessions_[sid] = {fd, target_fd};
+
+                    // 通知目标 client 连接本地服务
+                    std::string to_target = FrameBuilder(MessageType::NEW_CONN)
+                                                .AppendU32(sid)
+                                                .AppendU16(target_port)
+                                                .Build();
+                    sessions_[target_fd]->writer.Append(std::move(to_target));
+                    sessions_[target_fd]->writer.Flush(target_fd);
+
+                    // 通知源 client session 已建立 (port=0 表示中继, 不需要连本地)
+                    std::string to_source = FrameBuilder(MessageType::NEW_CONN)
+                                                .AppendU32(sid)
+                                                .AppendU16(0)  // port=0 表示这是 relay ack
+                                                .Build();
+                    sess.writer.Append(std::move(to_source));
+                    sess.writer.Flush(fd);
+
+                    LOG_INFO("relay session %u: fd=%d -> '%s'(fd=%d) port=%u",
+                             sid, fd, target_name.c_str(), target_fd, target_port);
+                }
+            }
+            break;
+
         case MessageType::DATA:
             // client 回传的用户数据: { session_id, data_len, data }
             if (frame.payload.size() < 6) {
@@ -318,40 +375,72 @@ void TunnelServer::HandleFrame(int fd, const Frame& frame) {
                              sid, dlen, frame.payload.size());
                     break;
                 }
+                // 1) 先查 PortMapper (外部用户 session)
                 int user_fd = sess.GetUserFd(sid);
-                if (user_fd < 0) {
-                    LOG_WARN("DATA for unknown session_id=%u, closing session", sid);
-                    sess.mapper.RemoveSession(sid);
-                    std::string close_frame = FrameBuilder(MessageType::CLOSE)
-                                                  .AppendU32(sid)
-                                                  .Build();
-                    sess.writer.Append(std::move(close_frame));
-                    sess.writer.Flush(fd);
+                if (user_fd >= 0) {
+                    const char* data = &frame.payload[6];
+                    ssize_t written = write(user_fd, data, dlen);
+                    if (written < static_cast<ssize_t>(dlen)) {
+                        if (written < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+                            LOG_ERROR("write user_fd=%d failed: %s", user_fd, strerror(errno));
+                            CloseUser(user_fd);
+                        }
+                    }
                     break;
                 }
-                const char* data = &frame.payload[6];
-                ssize_t written = write(user_fd, data, dlen);
-                if (written < static_cast<ssize_t>(dlen)) {
-                    // 简单处理: 写不完先丢弃余量 (非阻塞 socket 正常)
-                    // TODO: 如果需要可靠, 给 user_fd 也加 WriteBuffer
-                    if (written < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
-                        LOG_ERROR("write user_fd=%d failed: %s", user_fd, strerror(errno));
-                        CloseUser(user_fd);
+                // 2) 再查 relay_sessions_ (client 间中继)
+                auto rit = relay_sessions_.find(sid);
+                if (rit != relay_sessions_.end()) {
+                    int other_fd = (rit->second.tunnel_a == fd) ?
+                                   rit->second.tunnel_b : rit->second.tunnel_a;
+                    auto other_it = sessions_.find(other_fd);
+                    if (other_it != sessions_.end()) {
+                        std::string relay_data = FrameBuilder(MessageType::DATA)
+                                                    .AppendBytes(frame.payload.data(),
+                                                                 frame.payload.size())
+                                                    .Build();
+                        other_it->second->writer.Append(std::move(relay_data));
+                        other_it->second->writer.Flush(other_fd);
+                    } else {
+                        LOG_WARN("relay session %u: other tunnel fd=%d gone, closing", sid, other_fd);
+                        relay_sessions_.erase(rit);
                     }
+                    break;
                 }
+                LOG_WARN("DATA for unknown session_id=%u from fd=%d", sid, fd);
             }
             break;
 
         case MessageType::CLOSE:
-            // client 通知关闭某 session (外部用户断开)
+            // client 通知关闭某 session
             if (frame.payload.size() < 4) break;
             {
                 uint32_t sid = ntohl(*reinterpret_cast<const uint32_t*>(&frame.payload[0]));
+                // 1) 先查 PortMapper
                 int user_fd = sess.GetUserFd(sid);
                 if (user_fd >= 0) {
                     CloseUser(user_fd);
+                    sess.mapper.RemoveSession(sid);
+                    break;
                 }
-                sess.mapper.RemoveSession(sid);
+                // 2) 再查 relay_sessions_
+                auto rit = relay_sessions_.find(sid);
+                if (rit != relay_sessions_.end()) {
+                    int other_fd = (rit->second.tunnel_a == fd) ?
+                                   rit->second.tunnel_b : rit->second.tunnel_a;
+                    auto other_it = sessions_.find(other_fd);
+                    if (other_it != sessions_.end()) {
+                        // 通知另一方 session 关闭
+                        std::string close_data = FrameBuilder(MessageType::CLOSE)
+                                                     .AppendBytes(frame.payload.data(),
+                                                                  frame.payload.size())
+                                                     .Build();
+                        other_it->second->writer.Append(std::move(close_data));
+                        other_it->second->writer.Flush(other_fd);
+                    }
+                    relay_sessions_.erase(rit);
+                    LOG_DEBUG("relay session %u closed (by fd=%d)", sid, fd);
+                }
             }
             break;
 

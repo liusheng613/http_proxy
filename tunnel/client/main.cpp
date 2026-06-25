@@ -8,19 +8,20 @@
 #include "../common/logger.h"
 #include "tunnel_client.h"
 
-// 用法: tunnel_client <server_ip> [server_port] [-n name] [-L local_port:remote_port] [-d]
+// 用法: tunnel_client <server_ip> [server_port] [-n name] [-L local:remote] [-C target:port] [-d]
 //   server_ip:   公网 server 的 IP
 //   server_port: 控制隧道端口, 默认 7000
 //   -n name:     client 名字 (可选, 用于链路探活路由)
 //   -L: 端口映射 (可多个), 例如 -L 22:10022 表示把本地 22 映射到 server 公网 10022
+//   -C target:port: 启动后自动发起中继连接到目标 client 的端口
 //   -d: 开启 DEBUG 日志 (默认 INFO)
 int main(int argc, char** argv) {
     ::signal(SIGPIPE, SIG_IGN);
 
     if (argc < 2) {
         fprintf(stderr,
-                "usage: %s <server_ip> [server_port] [-n name] [-L local:remote] [-d]\n"
-                "  example: %s 1.2.3.4 7000 -n client_a -L 22:10022 -L 8080:18080 -d\n",
+                "usage: %s <server_ip> [server_port] [-n name] [-L local:remote] [-C target:port] [-d]\n"
+                "  example: %s 1.2.3.4 7000 -n client_a -L 22:10022 -C client_b:9000 -d\n",
                 argv[0], argv[0]);
         return 1;
     }
@@ -30,6 +31,7 @@ int main(int argc, char** argv) {
     bool got_port = false;
     std::vector<tunnel::client::PortMapping> mappings;
     std::string name;
+    std::string auto_connect;
 
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "-d") == 0 || std::strcmp(argv[i], "--debug") == 0) {
@@ -67,6 +69,20 @@ int main(int argc, char** argv) {
             mappings.emplace_back(local_port, remote_port);
             continue;
         }
+        if (std::strcmp(argv[i], "-C") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "-C requires argument (target:port)\n");
+                return 1;
+            }
+            ++i;
+            char* colon = std::strchr(argv[i], ':');
+            if (!colon) {
+                fprintf(stderr, "invalid connect format: %s (expected name:port)\n", argv[i]);
+                return 1;
+            }
+            auto_connect = argv[i];
+            continue;
+        }
         if (server_ip.empty()) {
             server_ip = argv[i];
             continue;
@@ -82,15 +98,15 @@ int main(int argc, char** argv) {
         }
     }
     if (server_ip.empty()) {
-        fprintf(stderr, "usage: %s <server_ip> [server_port] [-n name] [-L local:remote] [-d]\n",
+        fprintf(stderr, "usage: %s <server_ip> [server_port] [-n name] [-L local:remote] [-C target:port] [-d]\n",
                 argv[0]);
         return 1;
     }
 
-    LOG_INFO("tunnel client starting -> %s:%u (%zu mappings, name='%s')",
-             server_ip.c_str(), server_port, mappings.size(), name.c_str());
+    LOG_INFO("tunnel client starting -> %s:%u (%zu mappings, name='%s', connect='%s')",
+             server_ip.c_str(), server_port, mappings.size(), name.c_str(), auto_connect.c_str());
 
-    tunnel::client::TunnelClient client(server_ip, server_port, mappings, name);
+    tunnel::client::TunnelClient client(server_ip, server_port, mappings, name, auto_connect);
     client.Run();
 
     LOG_INFO("tunnel client exit");

@@ -88,6 +88,14 @@ private:
 
     // 全局 remote_port 占用表: remote_port -> tunnel_fd (端口冲突检测)
     std::unordered_map<uint16_t, int> port_owners_;
+
+    // client 间中继会话: session_id -> {tunnel_a, tunnel_b}
+    // 当 client A 发起连接 client B 时创建, 数据在两者间转发。
+    struct RelaySession {
+        int tunnel_a;  // 发起方
+        int tunnel_b;  // 目标方
+    };
+    std::unordered_map<uint32_t, RelaySession> relay_sessions_;
 };
 
 }  // namespace server

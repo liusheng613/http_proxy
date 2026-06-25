@@ -22,11 +22,12 @@ constexpr int kEpollTimeoutMs = 1000;
 
 TunnelClient::TunnelClient(const std::string& server_ip, uint16_t server_port,
                            const std::vector<PortMapping>& mappings,
-                           const std::string& name)
+                           const std::string& name,
+                           const std::string& auto_connect)
     : server_ip_(server_ip), server_port_(server_port),
-      mappings_(mappings), name_(name),
+      mappings_(mappings), name_(name), auto_connect_target_(auto_connect),
       tunnel_fd_(-1), epfd_(-1), connected_(false),
-      last_send_heartbeat_(0), last_recv_heartbeat_(0) {}
+      last_send_heartbeat_(0), last_recv_heartbeat_(0), active_relay_sid_(0) {}
 
 TunnelClient::~TunnelClient() { Disconnect(); }
 
@@ -71,6 +72,12 @@ void TunnelClient::Disconnect() {
     }
     sessions_.clear();
     local_to_session_.clear();
+
+    // 清理 stdin 监听 (如果 relay session 活跃)
+    if (active_relay_sid_ > 0) {
+        epoll_ctl(epfd_, EPOLL_CTL_DEL, 0, nullptr);
+        active_relay_sid_ = 0;
+    }
 
     if (tunnel_fd_ >= 0) {
         epoll_ctl(epfd_, EPOLL_CTL_DEL, tunnel_fd_, nullptr);
@@ -150,8 +157,9 @@ void TunnelClient::HandleFrame(const Frame& frame) {
             break;
 
         case MessageType::NEW_CONN:
-            // server 通知: 有外部用户连到了映射端口, 需要连本地服务
-            // payload: { uint32 session_id; uint16 local_port; }
+            // server 通知: { uint32 session_id; uint16 local_port; }
+            //   local_port>0: 连本地服务 (外部用户或中继目标)
+            //   local_port=0: 中继 ACK (组网连接已建立)
             if (frame.payload.size() < 6) {
                 LOG_WARN("NEW_CONN payload too short");
                 break;
@@ -159,7 +167,20 @@ void TunnelClient::HandleFrame(const Frame& frame) {
             {
                 uint32_t sid = ntohl(*reinterpret_cast<const uint32_t*>(&frame.payload[0]));
                 uint16_t local_port = ntohs(*reinterpret_cast<const uint16_t*>(&frame.payload[4]));
-                HandleNewConn(sid, local_port);
+                if (local_port == 0) {
+                    // 中继 ACK: 到目标 client 的连接已建立
+                    LOG_INFO("relay session %u established, stdin ↔ relay active", sid);
+                    active_relay_sid_ = sid;
+                    // 添加 stdin 到 epoll, 用于中继数据交互
+                    epoll_event ev{};
+                    ev.events = EPOLLIN;  // LT 模式, 方便读行
+                    ev.data.fd = 0;
+                    epoll_ctl(epfd_, EPOLL_CTL_ADD, 0, &ev);
+                    // 提示用户
+                    LOG_INFO("type/paste data and press Enter to send to relay session %u", sid);
+                } else {
+                    HandleNewConn(sid, local_port);
+                }
             }
             break;
 
@@ -177,6 +198,13 @@ void TunnelClient::HandleFrame(const Frame& frame) {
                     LOG_WARN("DATA payload truncated");
                     break;
                 }
+                // 检查是否是中继 session (数据来自另一个 client)
+                if (sid == active_relay_sid_) {
+                    const char* data = &frame.payload[6];
+                    HandleRelayData(sid, data, dlen);
+                    break;
+                }
+                // 否则是本地服务 session
                 auto it = sessions_.find(sid);
                 if (it == sessions_.end()) {
                     LOG_WARN("DATA for unknown session_id=%u", sid);
@@ -192,10 +220,17 @@ void TunnelClient::HandleFrame(const Frame& frame) {
             break;
 
         case MessageType::CLOSE:
-            // server 通知关闭某 session (外部用户断开)
+            // server 通知关闭某 session (外部用户或中继断开)
             if (frame.payload.size() < 4) break;
             {
                 uint32_t sid = ntohl(*reinterpret_cast<const uint32_t*>(&frame.payload[0]));
+                if (sid == active_relay_sid_) {
+                    LOG_INFO("relay session %u closed by peer", sid);
+                    // 从 epoll 移除 stdin
+                    epoll_ctl(epfd_, EPOLL_CTL_DEL, 0, nullptr);
+                    active_relay_sid_ = 0;
+                    break;
+                }
                 CloseLocal(sid);
             }
             break;
@@ -210,6 +245,17 @@ void TunnelClient::HandleFrame(const Frame& frame) {
                 uint8_t code = static_cast<uint8_t>(frame.payload[0]);
                 if (code == 0) {
                     LOG_INFO("REGISTER success (name='%s')", name_.c_str());
+                    // 注册成功后, 如果有自动中继目标, 发起连接
+                    if (!auto_connect_target_.empty()) {
+                        auto colon = auto_connect_target_.find(':');
+                        if (colon != std::string::npos) {
+                            std::string target = auto_connect_target_.substr(0, colon);
+                            int port = std::atoi(auto_connect_target_.substr(colon+1).c_str());
+                            if (port > 0 && port <= 65535) {
+                                SendRelayNewConn(target, static_cast<uint16_t>(port));
+                            }
+                        }
+                    }
                 } else {
                     LOG_WARN("REGISTER failed: name '%s' already used by another client",
                              name_.c_str());
@@ -458,6 +504,88 @@ void TunnelClient::HandleProbeReply(uint32_t probe_id, uint8_t status) {
     }
 }
 
+void TunnelClient::SendRelayNewConn(const std::string& target_name, uint16_t target_port) {
+    if (!connected_) return;
+    FrameBuilder builder(MessageType::NEW_CONN);
+    builder.AppendU32(0);  // session_id=0 表示新的组网请求
+    builder.AppendU16(static_cast<uint16_t>(target_name.size()));
+    builder.AppendStr(target_name);
+    builder.AppendU16(target_port);
+    std::string frame = builder.Build();
+    writer_.Append(std::move(frame));
+    writer_.Flush(tunnel_fd_);
+    LOG_INFO("sent relay NEW_CONN to '%s':%u", target_name.c_str(), target_port);
+}
+
+void TunnelClient::HandleStdinReadable() {
+    char buf[4096];
+    ssize_t n = read(0, buf, sizeof(buf));
+    if (n <= 0) {
+        if (n == 0) {
+            LOG_INFO("stdin closed (EOF)");
+        } else if (errno != EAGAIN && errno != EINTR) {
+            LOG_ERROR("stdin read error: %s", strerror(errno));
+        }
+        if (active_relay_sid_ > 0) {
+            std::string frame = FrameBuilder(MessageType::CLOSE)
+                                    .AppendU32(active_relay_sid_)
+                                    .Build();
+            writer_.Append(std::move(frame));
+            writer_.Flush(tunnel_fd_);
+            epoll_ctl(epfd_, EPOLL_CTL_DEL, 0, nullptr);
+            active_relay_sid_ = 0;
+        }
+        return;
+    }
+    while (n > 0 && (buf[n-1] == '\n' || buf[n-1] == '\r')) --n;
+    if (n == 0) return;
+
+    if (active_relay_sid_ > 0) {
+        std::string frame = FrameBuilder(MessageType::DATA)
+                                .AppendU32(active_relay_sid_)
+                                .AppendU16(static_cast<uint16_t>(n))
+                                .AppendBytes(buf, static_cast<size_t>(n))
+                                .Build();
+        writer_.Append(std::move(frame));
+        writer_.Flush(tunnel_fd_);
+        LOG_DEBUG("relay data (%zu bytes) -> session %u", n, active_relay_sid_);
+    } else {
+        buf[n] = '\0';
+        std::string cmd(buf);
+        if (cmd == "quit" || cmd == "exit") {
+            LOG_INFO("exit by user command");
+            Disconnect();
+            return;
+        }
+        if (cmd.find("connect ") == 0) {
+            auto rest = cmd.substr(8);
+            auto space = rest.find(' ');
+            if (space != std::string::npos) {
+                std::string target = rest.substr(0, space);
+                int port = std::atoi(rest.substr(space + 1).c_str());
+                if (port > 0 && port <= 65535) {
+                    SendRelayNewConn(target, static_cast<uint16_t>(port));
+                } else {
+                    LOG_WARN("invalid port: %s", rest.substr(space + 1).c_str());
+                }
+            } else {
+                LOG_WARN("usage: connect <target_name> <port>");
+            }
+        } else {
+            LOG_WARN("unknown cmd: '%s' (try: connect <name> <port>, quit, exit)", cmd.c_str());
+        }
+    }
+}
+
+void TunnelClient::HandleRelayData(uint32_t sid, const char* data, uint16_t dlen) {
+    ssize_t w = write(1, data, dlen);
+    if (w < 0) {
+        LOG_ERROR("write relay data to stdout failed: %s", strerror(errno));
+    }
+    write(1, "\n", 1);
+    LOG_DEBUG("relay data (%u bytes) from session %u written to stdout", dlen, sid);
+}
+
 void TunnelClient::Run() {
     bool need_backoff = false;
     for (;;) {
@@ -520,9 +648,16 @@ void TunnelClient::Run() {
                     break;
                 }
             } else {
-                // local_fd
-                if (events[i].events & EPOLLIN) {
-                    HandleLocalReadable(fd);
+                if (fd == 0) {
+                    // stdin
+                    if (events[i].events & EPOLLIN) {
+                        HandleStdinReadable();
+                    }
+                } else {
+                    // local_fd
+                    if (events[i].events & EPOLLIN) {
+                        HandleLocalReadable(fd);
+                    }
                 }
                 // TODO: 如果 local_fd 也是非阻塞 connect (未立即完成),
                 //       需要在 EPOLLOUT 时确认连接完成。这里简化处理,

@@ -25,7 +25,8 @@ class TunnelClient {
 public:
     TunnelClient(const std::string& server_ip, uint16_t server_port,
                  const std::vector<PortMapping>& mappings,
-                 const std::string& name = "");
+                 const std::string& name = "",
+                 const std::string& auto_connect = "");
     ~TunnelClient();
 
     TunnelClient(const TunnelClient&) = delete;
@@ -69,10 +70,18 @@ private:
     // 发送探活请求到目标 client (可选功能, 用于测试)
     void SendProbe(const std::string& target_name, uint32_t probe_id);
 
+    // 处理 stdin 输入 (交互命令)
+    void HandleStdinReadable();
+    // 发起 client 间中继连接
+    void SendRelayNewConn(const std::string& target_name, uint16_t target_port);
+    // 处理中继数据的读写 (stdin -> server, server -> stdout)
+    void HandleRelayData(uint32_t sid, const char* data, uint16_t dlen);
+
     std::string server_ip_;
     uint16_t    server_port_;
     std::vector<PortMapping> mappings_;
     std::string name_;  // client 名字 (可选, 用于 PROBE 路由)
+    std::string auto_connect_target_; // 启动后自动连接的目标 "name:port"
 
     int tunnel_fd_;
     int epfd_;
@@ -89,6 +98,9 @@ private:
 
     // local_fd -> session_id (反向映射)
     std::unordered_map<int, uint32_t> local_to_session_;
+
+    // 当前活跃的中继 session_id (0=无)。用于 stdin ↔ server 交互。
+    uint32_t active_relay_sid_;
 };
 
 }  // namespace client
