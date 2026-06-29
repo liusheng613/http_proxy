@@ -23,9 +23,11 @@ constexpr int kEpollTimeoutMs = 1000;
 TunnelClient::TunnelClient(const std::string& server_ip, uint16_t server_port,
                            const std::vector<PortMapping>& mappings,
                            const std::string& name,
-                           const std::string& auto_connect)
+                           const std::string& auto_connect,
+                           const std::vector<LocalRelayConfig>& relay_listens)
     : server_ip_(server_ip), server_port_(server_port),
       mappings_(mappings), name_(name), auto_connect_target_(auto_connect),
+      relay_listens_(relay_listens),
       tunnel_fd_(-1), epfd_(-1), connected_(false),
       last_send_heartbeat_(0), last_recv_heartbeat_(0), active_relay_sid_(0) {}
 
@@ -65,7 +67,7 @@ bool TunnelClient::Connect() {
 }
 
 void TunnelClient::Disconnect() {
-    // 关闭所有 local_fd
+    // 关闭所有 local_fd (端口映射)
     for (auto& kv : sessions_) {
         epoll_ctl(epfd_, EPOLL_CTL_DEL, kv.second, nullptr);
         close(kv.second);
@@ -77,6 +79,20 @@ void TunnelClient::Disconnect() {
     if (active_relay_sid_ > 0) {
         epoll_ctl(epfd_, EPOLL_CTL_DEL, 0, nullptr);
         active_relay_sid_ = 0;
+    }
+
+    // 关闭中继监听 fd
+    for (auto& kv : relay_listen_fds_) {
+        epoll_ctl(epfd_, EPOLL_CTL_DEL, kv.first, nullptr);
+        close(kv.first);
+    }
+    relay_listen_fds_.clear();
+
+    // 清理 pending relay user fd
+    if (pending_relay_user_fd_ >= 0) {
+        close(pending_relay_user_fd_);
+        pending_relay_user_fd_ = -1;
+        pending_relay_target_.clear();
     }
 
     if (tunnel_fd_ >= 0) {
@@ -102,11 +118,12 @@ void TunnelClient::HandleTunnelWritable() {
                  server_port_, tunnel_fd_);
         last_recv_heartbeat_ = time(nullptr);
 
-        // 连接成功, 先注册名字 (如果有), 再发端口映射, 最后发心跳
+        // 连接成功, 先注册名字 (如果有), 再发端口映射, 设置本地中继, 最后发心跳
         if (!name_.empty()) {
             SendRegister();
         }
         SendPortMap();
+        SetupLocalRelayListeners();
         SendHeartbeat();
     }
 
@@ -168,16 +185,38 @@ void TunnelClient::HandleFrame(const Frame& frame) {
                 uint32_t sid = ntohl(*reinterpret_cast<const uint32_t*>(&frame.payload[0]));
                 uint16_t local_port = ntohs(*reinterpret_cast<const uint16_t*>(&frame.payload[4]));
                 if (local_port == 0) {
-                    // 中继 ACK: 到目标 client 的连接已建立
-                    LOG_INFO("relay session %u established, stdin ↔ relay active", sid);
-                    active_relay_sid_ = sid;
-                    // 添加 stdin 到 epoll, 用于中继数据交互
-                    epoll_event ev{};
-                    ev.events = EPOLLIN;  // LT 模式, 方便读行
-                    ev.data.fd = 0;
-                    epoll_ctl(epfd_, EPOLL_CTL_ADD, 0, &ev);
-                    // 提示用户
-                    LOG_INFO("type/paste data and press Enter to send to relay session %u", sid);
+                    // 中继 ACK
+                    if (pending_relay_user_fd_ >= 0) {
+                        // 来自本地监听中继: 关联 sid -> user_fd
+                        sessions_[sid] = pending_relay_user_fd_;
+                        local_to_session_[pending_relay_user_fd_] = sid;
+                        LOG_INFO("relay session %u established -> local user_fd=%d (target=%s)",
+                                 sid, pending_relay_user_fd_, pending_relay_target_.c_str());
+                        // 发送 pending 期间积压的数据
+                        if (!pending_relay_buf_.empty()) {
+                            std::string frame = FrameBuilder(MessageType::DATA)
+                                                    .AppendU32(sid)
+                                                    .AppendU16(static_cast<uint16_t>(pending_relay_buf_.size()))
+                                                    .AppendBytes(pending_relay_buf_.data(), pending_relay_buf_.size())
+                                                    .Build();
+                            writer_.Append(std::move(frame));
+                            writer_.Flush(tunnel_fd_);
+                            LOG_DEBUG("flushed %zu buffered bytes to relay session %u",
+                                     pending_relay_buf_.size(), sid);
+                            pending_relay_buf_.clear();
+                        }
+                        pending_relay_user_fd_ = -1;
+                        pending_relay_target_.clear();
+                    } else {
+                        // 来自 stdin 命令: 进入 stdin 中继模式
+                        LOG_INFO("relay session %u established, stdin ↔ relay active", sid);
+                        active_relay_sid_ = sid;
+                        epoll_event ev{};
+                        ev.events = EPOLLIN;
+                        ev.data.fd = 0;
+                        epoll_ctl(epfd_, EPOLL_CTL_ADD, 0, &ev);
+                        LOG_INFO("type/paste data and press Enter to send to relay session %u", sid);
+                    }
                 } else {
                     HandleNewConn(sid, local_port);
                 }
@@ -586,6 +625,121 @@ void TunnelClient::HandleRelayData(uint32_t sid, const char* data, uint16_t dlen
     LOG_DEBUG("relay data (%u bytes) from session %u written to stdout", dlen, sid);
 }
 
+void TunnelClient::SetupLocalRelayListeners() {
+    if (relay_listens_.empty()) return;
+    // 需要在 Connect() 之后调用, 此时 epfd_ 已就绪
+    for (auto& cfg : relay_listens_) {
+        int lfd = net::create_listen_socket(cfg.local_port);
+        if (lfd < 0) {
+            LOG_ERROR("failed to listen on local port %u for relay to %s:%u",
+                      cfg.local_port, cfg.target_name.c_str(), cfg.target_port);
+            continue;
+        }
+        epoll_event ev{};
+        ev.events = EPOLLIN | EPOLLET;
+        ev.data.fd = lfd;
+        if (epoll_ctl(epfd_, EPOLL_CTL_ADD, lfd, &ev) < 0) {
+            LOG_ERROR("epoll_ctl add relay listen fd=%d failed", lfd);
+            close(lfd);
+            continue;
+        }
+        relay_listen_fds_[lfd] = cfg;
+        LOG_INFO("local relay listen 127.0.0.1:%u -> relay to '%s':%u",
+                 cfg.local_port, cfg.target_name.c_str(), cfg.target_port);
+    }
+}
+
+void TunnelClient::HandleLocalRelayAccept(int listen_fd) {
+    auto it = relay_listen_fds_.find(listen_fd);
+    if (it == relay_listen_fds_.end()) return;
+    for (;;) {
+        int user_fd = accept(listen_fd, nullptr, nullptr);
+        if (user_fd < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+            if (errno == EINTR) continue;
+            LOG_ERROR("local relay accept failed: %s", strerror(errno));
+            break;
+        }
+        net::set_nonblock(user_fd);
+        epoll_event ev{};
+        ev.events = EPOLLIN | EPOLLET;  // ET mode, pending 数据由 pending_relay_buf_ 处理
+        ev.data.fd = user_fd;
+        if (epoll_ctl(epfd_, EPOLL_CTL_ADD, user_fd, &ev) < 0) {
+            LOG_ERROR("epoll_ctl add relay user_fd=%d failed", user_fd);
+            close(user_fd);
+            continue;
+        }
+        // 暂存 pending, 发起中继连接
+        pending_relay_user_fd_ = user_fd;
+        pending_relay_target_ = it->second.target_name;
+        SendRelayNewConn(it->second.target_name, it->second.target_port);
+        LOG_INFO("local relay user connected fd=%d, requesting relay to '%s':%u",
+                 user_fd, it->second.target_name.c_str(), it->second.target_port);
+    }
+}
+
+void TunnelClient::HandleLocalRelayUserReadable(int user_fd) {
+    auto it = local_to_session_.find(user_fd);
+    bool is_pending = (it == local_to_session_.end());
+
+    char buf[65536];
+    for (;;) {
+        ssize_t n = read(user_fd, buf, sizeof(buf));
+        if (n > 0) {
+            if (is_pending) {
+                // 中继 ACK 还没到, 先缓存起来
+                pending_relay_buf_.append(buf, static_cast<size_t>(n));
+                continue;
+            }
+            // 转发到中继 session
+            uint32_t sid = it->second;
+            std::string frame = FrameBuilder(MessageType::DATA)
+                                    .AppendU32(sid)
+                                    .AppendU16(static_cast<uint16_t>(n))
+                                    .AppendBytes(buf, static_cast<size_t>(n))
+                                    .Build();
+            writer_.Append(std::move(frame));
+            writer_.Flush(tunnel_fd_);
+            continue;
+        }
+        if (n == 0) {
+            if (is_pending) {
+                LOG_INFO("local relay user fd=%d disconnected before session established", user_fd);
+                pending_relay_user_fd_ = -1;
+                pending_relay_target_.clear();
+                pending_relay_buf_.clear();
+            } else {
+                uint32_t sid = it->second;
+                LOG_INFO("local relay user fd=%d disconnected (session %u)", user_fd, sid);
+                std::string frame = FrameBuilder(MessageType::CLOSE)
+                                        .AppendU32(sid).Build();
+                writer_.Append(std::move(frame));
+                writer_.Flush(tunnel_fd_);
+                sessions_.erase(sid);
+                local_to_session_.erase(user_fd);
+            }
+            epoll_ctl(epfd_, EPOLL_CTL_DEL, user_fd, nullptr);
+            close(user_fd);
+            return;
+        }
+        if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+        if (errno == EINTR) continue;
+        LOG_ERROR("read local relay user_fd=%d failed: %s", user_fd, strerror(errno));
+        if (!is_pending) {
+            uint32_t sid = it->second;
+            sessions_.erase(sid);
+            local_to_session_.erase(user_fd);
+        } else {
+            pending_relay_user_fd_ = -1;
+            pending_relay_target_.clear();
+            pending_relay_buf_.clear();
+        }
+        epoll_ctl(epfd_, EPOLL_CTL_DEL, user_fd, nullptr);
+        close(user_fd);
+        return;
+    }
+}
+
 void TunnelClient::Run() {
     bool need_backoff = false;
     for (;;) {
@@ -649,12 +803,21 @@ void TunnelClient::Run() {
                 }
             } else {
                 if (fd == 0) {
-                    // stdin
                     if (events[i].events & EPOLLIN) {
                         HandleStdinReadable();
                     }
+                } else if (relay_listen_fds_.count(fd)) {
+                    // 本地中继监听端口有新的用户连接
+                    if (events[i].events & EPOLLIN) {
+                        HandleLocalRelayAccept(fd);
+                    }
+                } else if (local_to_session_.count(fd)) {
+                    // 本地中继用户连接上有数据
+                    if (events[i].events & EPOLLIN) {
+                        HandleLocalRelayUserReadable(fd);
+                    }
                 } else {
-                    // local_fd
+                    // 普通 local_fd (端口映射模式)
                     if (events[i].events & EPOLLIN) {
                         HandleLocalReadable(fd);
                     }

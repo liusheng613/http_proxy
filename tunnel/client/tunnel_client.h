@@ -17,6 +17,13 @@ namespace client {
 // 端口映射配置项: (本地端口, 远程公网端口)
 using PortMapping = std::pair<uint16_t, uint16_t>;
 
+// 本地中继监听配置: 在本地端口监听, 收到连接后经中继转发到目标 client 的端口
+struct LocalRelayConfig {
+    uint16_t local_port;
+    std::string target_name;
+    uint16_t target_port;
+};
+
 // 内网客户端: 主动连公网 server, 建立控制隧道。
 //
 // 阶段 2: 连接成功后发 PORT_MAP, 收 NEW_CONN 连本地服务, DATA 双向转发。
@@ -26,7 +33,8 @@ public:
     TunnelClient(const std::string& server_ip, uint16_t server_port,
                  const std::vector<PortMapping>& mappings,
                  const std::string& name = "",
-                 const std::string& auto_connect = "");
+                 const std::string& auto_connect = "",
+                 const std::vector<LocalRelayConfig>& relay_listens = {});
     ~TunnelClient();
 
     TunnelClient(const TunnelClient&) = delete;
@@ -77,11 +85,19 @@ private:
     // 处理中继数据的读写 (stdin -> server, server -> stdout)
     void HandleRelayData(uint32_t sid, const char* data, uint16_t dlen);
 
+    // 处理本地中继监听端口的 accept
+    void HandleLocalRelayAccept(int listen_fd);
+    // 处理本地中继用户连接上的数据 (作为 relay 发起方)
+    void HandleLocalRelayUserReadable(int user_fd);
+    // 设置本地中继监听 (连接 server 后调用)
+    void SetupLocalRelayListeners();
+
     std::string server_ip_;
     uint16_t    server_port_;
     std::vector<PortMapping> mappings_;
     std::string name_;  // client 名字 (可选, 用于 PROBE 路由)
     std::string auto_connect_target_; // 启动后自动连接的目标 "name:port"
+    std::vector<LocalRelayConfig> relay_listens_; // 本地中继监听配置
 
     int tunnel_fd_;
     int epfd_;
@@ -101,6 +117,15 @@ private:
 
     // 当前活跃的中继 session_id (0=无)。用于 stdin ↔ server 交互。
     uint32_t active_relay_sid_;
+
+    // 本地中继监听: fd -> (target_name, target_port)
+    std::unordered_map<int, LocalRelayConfig> relay_listen_fds_;
+    // 等待 relay ack 的 user_fd (本地用户连接, 等待 server 分配 session_id)
+    int pending_relay_user_fd_ = -1;
+    // pending 期间读到的数据 (在 relay ack 到达前用户已经发来的数据)
+    std::string pending_relay_buf_;
+    // 本地用户连接对应的中继目标名 (pending 时暂存)
+    std::string pending_relay_target_;
 };
 
 }  // namespace client
