@@ -8,6 +8,7 @@
 
 #include "../common/logger.h"
 #include "../common/netutil.h"
+#include "../common/tun.h"
 
 namespace tunnel {
 namespace client {
@@ -25,10 +26,11 @@ TunnelClient::TunnelClient(const std::string& server_ip, uint16_t server_port,
                            const std::string& name,
                            const std::string& auto_connect,
                            const std::vector<LocalRelayConfig>& relay_listens,
-                           const std::string& token)
+                           const std::string& token,
+                           const std::string& tun_ip)
     : server_ip_(server_ip), server_port_(server_port),
       mappings_(mappings), name_(name), auto_connect_target_(auto_connect),
-      relay_listens_(relay_listens), token_(token),
+      relay_listens_(relay_listens), token_(token), tun_ip_(tun_ip),
       tunnel_fd_(-1), epfd_(-1), connected_(false),
       last_send_heartbeat_(0), last_recv_heartbeat_(0), active_relay_sid_(0) {}
 
@@ -89,6 +91,13 @@ void TunnelClient::Disconnect() {
     }
     relay_listen_fds_.clear();
 
+    // 关闭 TUN 设备
+    if (tun_fd_ >= 0) {
+        epoll_ctl(epfd_, EPOLL_CTL_DEL, tun_fd_, nullptr);
+        close(tun_fd_);
+        tun_fd_ = -1;
+    }
+
     // 清理 pending relay user fd
     if (pending_relay_user_fd_ >= 0) {
         close(pending_relay_user_fd_);
@@ -136,6 +145,7 @@ void TunnelClient::HandleTunnelWritable() {
         }
         SendPortMap();
         SetupLocalRelayListeners();
+        SetupTun();
         SendHeartbeat();
     }
 
@@ -365,6 +375,12 @@ void TunnelClient::HandleFrame(const Frame& frame) {
             }
             break;
 
+        case MessageType::TUN_PACKET:
+            if (tun_fd_ >= 0) {
+                write(tun_fd_, frame.payload.data(), frame.payload.size());
+            }
+            break;
+
         default:
             LOG_INFO("recv %s (payload_len=%zu), not handled",
                      msg_type_str(frame.type), frame.payload.size());
@@ -385,14 +401,20 @@ void TunnelClient::SendAuth() {
 
 void TunnelClient::SendRegister() {
     if (name_.empty()) return;
-    // payload: { uint8 name_len; char name[name_len]; }
+    // payload: { uint8 name_len; char name[name_len]; uint32 ip; }
     FrameBuilder builder(MessageType::REGISTER);
     builder.AppendU8(static_cast<uint8_t>(name_.size()));
     builder.AppendStr(name_);
+    // 解析 IP 字符串为 uint32
+    uint32_t ip = 0;
+    if (!tun_ip_.empty()) {
+        inet_pton(AF_INET, tun_ip_.c_str(), &ip);
+    }
+    builder.AppendU32(ntohl(ip));  // 已经是 host byte order, encode_frame_header 会转
     std::string frame = builder.Build();
     writer_.Append(std::move(frame));
     writer_.Flush(tunnel_fd_);
-    LOG_INFO("sent REGISTER (name='%s')", name_.c_str());
+    LOG_INFO("sent REGISTER (name='%s', ip=%s)", name_.c_str(), tun_ip_.c_str());
 }
 
 void TunnelClient::SendPortMap() {
@@ -841,6 +863,52 @@ void TunnelClient::SetupLocalRelayListeners() {
     }
 }
 
+void TunnelClient::SetupTun() {
+    if (tun_ip_.empty()) return;
+    tun_fd_ = tun::create("tun%d");
+    if (tun_fd_ < 0) {
+        LOG_ERROR("TUN device creation failed, TUN disabled");
+        tun_ip_.clear();
+        return;
+    }
+    // 获取设备名
+    ifreq ifr{};
+    std::strncpy(ifr.ifr_name, "tun%d", IFNAMSIZ - 1);
+    ioctl(tun_fd_, TUNGETIFF, &ifr);
+    std::string dev_name = ifr.ifr_name;
+    net::set_nonblock(tun_fd_);
+
+    // 配置 IP + 路由 (需要 root)
+    tun::set_ip(dev_name, tun_ip_, 24);
+    tun::add_route("10.0.0.0/24", dev_name);
+
+    epoll_event ev{};
+    ev.events = EPOLLIN | EPOLLET;
+    ev.data.fd = tun_fd_;
+    epoll_ctl(epfd_, EPOLL_CTL_ADD, tun_fd_, &ev);
+    LOG_INFO("TUN ready: %s -> %s", dev_name.c_str(), tun_ip_.c_str());
+}
+
+void TunnelClient::HandleTunReadable() {
+    if (tun_fd_ < 0) return;
+    char buf[65536];
+    for (;;) {
+        ssize_t n = read(tun_fd_, buf, sizeof(buf));
+        if (n > 0) {
+            std::string frame = FrameBuilder(MessageType::TUN_PACKET)
+                                    .AppendBytes(buf, static_cast<size_t>(n))
+                                    .Build();
+            writer_.Append(std::move(frame));
+            writer_.Flush(tunnel_fd_);
+            continue;
+        }
+        if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+        if (errno == EINTR) continue;
+        LOG_ERROR("read TUN fd failed: %s", strerror(errno));
+        break;
+    }
+}
+
 void TunnelClient::HandleLocalRelayAccept(int listen_fd) {
     auto it = relay_listen_fds_.find(listen_fd);
     if (it == relay_listen_fds_.end()) return;
@@ -1010,6 +1078,10 @@ void TunnelClient::Run() {
                 if (fd == 0) {
                     if (events[i].events & EPOLLIN) {
                         HandleStdinReadable();
+                    }
+                } else if (fd == tun_fd_) {
+                    if (events[i].events & EPOLLIN) {
+                        HandleTunReadable();
                     }
                 } else if (relay_listen_fds_.count(fd)) {
                     if (events[i].events & EPOLLIN) {

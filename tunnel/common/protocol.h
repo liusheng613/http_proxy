@@ -36,8 +36,8 @@ enum class MessageType : uint8_t {
     // 心跳: 双向, 用于保活与链路探活。payload 空。
     HEARTBEAT = 0x01,
 
-    // 注册: client 上线时上报自己的名字, 供其它 client 路由访问。
-    //   payload: { uint8 name_len; char name[name_len]; }
+    // 注册: client 上线时上报自己的名字和虚拟 IP(可选)。
+    //   payload: { uint8 name_len; char name[name_len]; uint32 ip; }  ip=0 表示不启用 TUN
     REGISTER = 0x02,
 
     // 端口映射上报: client 告知 server "我暴露了哪些本地端口"。
@@ -90,6 +90,10 @@ enum class MessageType : uint8_t {
 
     // Token 鉴权: client 连接后立即发送。payload: { uint8 token_len; char token[token_len]; }
     AUTH = 0x0F,
+
+    // TUN 虚拟网卡数据包: 携带原始 IP 包。server 根据 IP 头 dst 路由到目标 client。
+    // payload: 完整原始 IP 包 (含 IP 头)
+    TUN_PACKET = 0x10,
 };
 
 inline const char* msg_type_str(MessageType t) {
@@ -109,6 +113,7 @@ inline const char* msg_type_str(MessageType t) {
         case MessageType::P2P_OK:   return "P2P_OK";
         case MessageType::P2P_FAIL: return "P2P_FAIL";
         case MessageType::AUTH:     return "AUTH";
+        case MessageType::TUN_PACKET: return "TUN_PACKET";
     }
     return "UNKNOWN";
 }

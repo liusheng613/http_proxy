@@ -35,7 +35,8 @@ public:
                  const std::string& name = "",
                  const std::string& auto_connect = "",
                  const std::vector<LocalRelayConfig>& relay_listens = {},
-                 const std::string& token = "");
+                 const std::string& token = "",
+                 const std::string& tun_ip = "");
     ~TunnelClient();
 
     TunnelClient(const TunnelClient&) = delete;
@@ -101,6 +102,10 @@ private:
     void HandleLocalRelayUserReadable(int user_fd);
     // 设置本地中继监听 (连接 server 后调用)
     void SetupLocalRelayListeners();
+    // 初始化 TUN 设备 (连接后调用)
+    void SetupTun();
+    // 处理 TUN 设备可读事件
+    void HandleTunReadable();
 
     std::string server_ip_;
     uint16_t    server_port_;
@@ -109,6 +114,8 @@ private:
     std::string auto_connect_target_; // 启动后自动连接的目标 "name:port"
     std::vector<LocalRelayConfig> relay_listens_; // 本地中继监听配置
     std::string token_;  // 鉴权 token (空=不鉴权)
+    std::string tun_ip_;  // TUN 虚拟 IP (空=不启用)
+    int tun_fd_ = -1;     // TUN 设备 fd
 
     int tunnel_fd_;
     int epfd_;

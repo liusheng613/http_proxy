@@ -115,9 +115,14 @@ void TunnelServer::CloseSession(int fd) {
         CloseUser(ufd);
     }
 
-    // 清理 name 映射
+    // 清理 name 和 IP 映射
     if (!it->second->name.empty()) {
         name_to_tunnel_.erase(it->second->name);
+    }
+    // 清理 IP 映射 (遍历 ip_to_tunnel_ 删除匹配的 fd)
+    for (auto ip_it = ip_to_tunnel_.begin(); ip_it != ip_to_tunnel_.end(); ) {
+        if (ip_it->second == fd) ip_it = ip_to_tunnel_.erase(ip_it);
+        else ++ip_it;
     }
 
     // 清理涉及此隧道的所有 relay session
@@ -301,19 +306,16 @@ void TunnelServer::HandleFrame(int fd, const Frame& frame) {
             }
             break;
 
-        case MessageType::REGISTER:
-            // client 注册名字: { uint8 name_len; char name[name_len]; }
-            if (frame.payload.size() < 1) {
-                LOG_WARN("REGISTER payload too short");
-                break;
+        case MessageType::REGISTER: {
+            // client 注册名字+IP: { uint8 name_len; char name[]; uint32 ip; }
+            if (frame.payload.size() < 1) break;
+            uint8_t name_len = static_cast<uint8_t>(frame.payload[0]);
+            if (frame.payload.size() < 1 + name_len) break;
+            std::string name = frame.payload.substr(1, name_len);
+            uint32_t ip = 0;
+            if (frame.payload.size() >= 1 + name_len + 4) {
+                ip = ntohl(*reinterpret_cast<const uint32_t*>(&frame.payload[1 + name_len]));
             }
-            {
-                uint8_t name_len = static_cast<uint8_t>(frame.payload[0]);
-                if (frame.payload.size() < 1 + name_len) {
-                    LOG_WARN("REGISTER payload truncated");
-                    break;
-                }
-                std::string name = frame.payload.substr(1, name_len);
                 // 检查名字是否已被占用
                 auto nit = name_to_tunnel_.find(name);
                 if (nit != name_to_tunnel_.end() && nit->second != fd) {
@@ -333,7 +335,13 @@ void TunnelServer::HandleFrame(int fd, const Frame& frame) {
                 }
                 sess.name = name;
                 name_to_tunnel_[name] = fd;
-                LOG_INFO("fd=%d REGISTER name='%s'", fd, name.c_str());
+                if (ip != 0) {
+                    ip_to_tunnel_[ip] = fd;
+                    LOG_INFO("fd=%d REGISTER name='%s' ip=%u.%u.%u.%u", fd, name.c_str(),
+                             (ip>>24)&0xFF, (ip>>16)&0xFF, (ip>>8)&0xFF, ip&0xFF);
+                } else {
+                    LOG_INFO("fd=%d REGISTER name='%s'", fd, name.c_str());
+                }
                 // 发 ACK(成功) 给 client
                 std::string ack = FrameBuilder(MessageType::ACK)
                                       .AppendU8(0)  // code=0 表示成功
@@ -548,6 +556,29 @@ void TunnelServer::HandleFrame(int fd, const Frame& frame) {
                     if (kv.first != fd) {
                         kv.second->writer.Append(reply_frame);
                         kv.second->writer.Flush(kv.first);
+                    }
+                }
+            }
+            break;
+
+        case MessageType::TUN_PACKET:
+            // TUN 路由: 解析原始 IP 包中的 dst IP, 转发到目标 client
+            if (frame.payload.size() < 20) break;  // 最小 IP 头 20 字节
+            {
+                // IP 头 dst 在偏移 16-19 (大端序)
+                uint32_t dst_ip = ntohl(*reinterpret_cast<const uint32_t*>(&frame.payload[16]));
+                auto tit = ip_to_tunnel_.find(dst_ip);
+                if (tit != ip_to_tunnel_.end() && tit->second != fd) {
+                    auto tgt = sessions_.find(tit->second);
+                    if (tgt != sessions_.end()) {
+                        std::string pkt = FrameBuilder(MessageType::TUN_PACKET)
+                                              .AppendBytes(frame.payload.data(), frame.payload.size())
+                                              .Build();
+                        tgt->second->writer.Append(std::move(pkt));
+                        tgt->second->writer.Flush(tit->second);
+                        LOG_DEBUG("TUN_PACKET forwarded to fd=%d (dst=%u.%u.%u.%u)",
+                                 tit->second, (dst_ip>>24)&0xFF, (dst_ip>>16)&0xFF,
+                                 (dst_ip>>8)&0xFF, dst_ip&0xFF);
                     }
                 }
             }

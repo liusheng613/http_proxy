@@ -91,6 +91,9 @@ private:
     // client 名字 -> tunnel_fd (用于 PROBE 路由)
     std::unordered_map<std::string, int> name_to_tunnel_;
 
+    // TUN 路由: 虚拟 IP -> tunnel_fd
+    std::unordered_map<uint32_t, int> ip_to_tunnel_;
+
     // 全局 remote_port 占用表: remote_port -> tunnel_fd (端口冲突检测)
     std::unordered_map<uint16_t, int> port_owners_;
 

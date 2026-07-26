@@ -38,6 +38,7 @@ int main(int argc, char** argv) {
     std::string auto_connect;
     std::string secret;
     std::string token;
+    std::string tun_ip;
 
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "-d") == 0 || std::strcmp(argv[i], "--debug") == 0) {
@@ -51,6 +52,10 @@ int main(int argc, char** argv) {
         if (std::strcmp(argv[i], "-t") == 0) {
             if (i + 1 >= argc) { fprintf(stderr, "-t requires argument\n"); return 1; }
             ++i; token = argv[i]; continue;
+        }
+        if (std::strcmp(argv[i], "-i") == 0) {
+            if (i + 1 >= argc) { fprintf(stderr, "-i requires argument\n"); return 1; }
+            ++i; tun_ip = argv[i]; continue;
         }
         if (std::strcmp(argv[i], "-n") == 0) {
             if (i + 1 >= argc) {
@@ -156,7 +161,7 @@ int main(int argc, char** argv) {
         LOG_INFO("encryption enabled (AES-256-GCM)");
     }
 
-    tunnel::client::TunnelClient client(server_ip, server_port, mappings, name, auto_connect, relay_listens, token);
+    tunnel::client::TunnelClient client(server_ip, server_port, mappings, name, auto_connect, relay_listens, token, tun_ip);
     client.Run();
 
     LOG_INFO("tunnel client exit");
