@@ -39,9 +39,8 @@ uint32_t TunnelServer::AllocateTunIp() {
     if (tun_subnet_base_ == 0) return 0;
     uint32_t base = ntohl(tun_subnet_base_);
     for (uint32_t host = 2; host < 255; ++host) {
-        uint32_t ip_host = base + host;               // host byte order
-        uint32_t ip_net = htonl(ip_host);             // network byte order (for map lookup)
-        if (!ip_to_tunnel_.count(ip_net)) return ip_host;  // return HOST order
+        uint32_t ip_host = base + host;  // host byte order (consistent with ip_to_tunnel_ keys)
+        if (!ip_to_tunnel_.count(ip_host)) return ip_host;
     }
     return 0;
 }
@@ -360,8 +359,9 @@ void TunnelServer::HandleFrame(int fd, const Frame& frame) {
                 name_to_tunnel_[name] = fd;
                 if (ip != 0) {
                     ip_to_tunnel_[ip] = fd;
-                    LOG_INFO("fd=%d REGISTER name='%s' ip=%u.%u.%u.%u", fd, name.c_str(),
-                             (ip>>24)&0xFF, (ip>>16)&0xFF, (ip>>8)&0xFF, ip&0xFF);
+                    uint32_t dip = htonl(ip);
+                    LOG_INFO("fd=%d REGISTER name='%s' ip=%s", fd, name.c_str(),
+                             inet_ntoa(*reinterpret_cast<in_addr*>(&dip)));
                 }
                 // 发 ACK, 附加 TUN IP (如果有)
                 std::string ack = FrameBuilder(MessageType::ACK).AppendU8(0).Build();
@@ -371,8 +371,10 @@ void TunnelServer::HandleFrame(int fd, const Frame& frame) {
                         ip_to_tunnel_[assigned_ip] = fd;
                         ack = FrameBuilder(MessageType::ACK)
                                   .AppendU8(0).AppendU32(assigned_ip).Build();
+                uint32_t display_ip = htonl(assigned_ip);  // inet_ntoa needs network order
                 LOG_INFO("fd=%d REGISTER name='%s' tun_ip=%s",
-                         fd, name.c_str(), inet_ntoa(*reinterpret_cast<in_addr*>(&assigned_ip)));
+                         fd, name.c_str(),
+                         inet_ntoa(*reinterpret_cast<in_addr*>(&display_ip)));
                     }
                 }
                 sess.writer.Append(std::move(ack));
