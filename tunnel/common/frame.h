@@ -42,7 +42,7 @@ public:
 
 private:
     void ConsumeHeader();
-    void ConsumePayload();
+    bool ConsumePayload();  // false: 解密失败
 
     enum class State { READ_HEADER, READ_PAYLOAD };
     State state_ = State::READ_HEADER;
@@ -76,12 +76,17 @@ public:
     FrameBuilder& AppendBytes(const char* data, size_t len);
 
     // 返回完整帧 (帧头 + payload)。调用后 Builder 可复用构造下一帧。
+    // 如果设置了全局加密密钥, 自动对 payload 做 AES-GCM 加密。
     std::string Build() const;
 
 private:
     MessageType type_;
     std::string payload_;
 };
+
+// 全局加密密钥 (空 = 不加密), 所有 FrameBuilder/FrameDecoder 自动加解密。
+void tunnel_set_crypto_key(const std::string& key);
+bool tunnel_has_crypto_key();
 
 }  // namespace tunnel
 

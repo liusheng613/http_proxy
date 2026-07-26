@@ -6,6 +6,8 @@
 #include <vector>
 
 #include "../common/logger.h"
+#include "../common/crypto.h"
+#include "../common/frame.h"
 #include "tunnel_client.h"
 
 // 用法: tunnel_client <server_ip> [server_port] [-n name] [-L local:remote] [-R local:target:port] [-C target:port] [-d]
@@ -34,11 +36,21 @@ int main(int argc, char** argv) {
     std::vector<tunnel::client::LocalRelayConfig> relay_listens;
     std::string name;
     std::string auto_connect;
+    std::string secret;
+    std::string token;
 
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "-d") == 0 || std::strcmp(argv[i], "--debug") == 0) {
             tunnel::set_log_level(tunnel::LOG_DEBUG);
             continue;
+        }
+        if (std::strcmp(argv[i], "-k") == 0) {
+            if (i + 1 >= argc) { fprintf(stderr, "-k requires argument\n"); return 1; }
+            ++i; secret = argv[i]; continue;
+        }
+        if (std::strcmp(argv[i], "-t") == 0) {
+            if (i + 1 >= argc) { fprintf(stderr, "-t requires argument\n"); return 1; }
+            ++i; token = argv[i]; continue;
         }
         if (std::strcmp(argv[i], "-n") == 0) {
             if (i + 1 >= argc) {
@@ -139,7 +151,12 @@ int main(int argc, char** argv) {
     LOG_INFO("tunnel client starting -> %s:%u (%zu mappings, name='%s', connect='%s', relay=%zu)",
              server_ip.c_str(), server_port, mappings.size(), name.c_str(), auto_connect.c_str(), relay_listens.size());
 
-    tunnel::client::TunnelClient client(server_ip, server_port, mappings, name, auto_connect, relay_listens);
+    if (!secret.empty()) {
+        tunnel::tunnel_set_crypto_key(tunnel::crypto::derive_key(secret));
+        LOG_INFO("encryption enabled (AES-256-GCM)");
+    }
+
+    tunnel::client::TunnelClient client(server_ip, server_port, mappings, name, auto_connect, relay_listens, token);
     client.Run();
 
     LOG_INFO("tunnel client exit");
