@@ -185,23 +185,148 @@ EOF
 
 返回 `status=0` 表示在线，`status=1` 表示不存在。
 
+### 方式 4：TUN 虚拟网卡（--tun）— 全透明组网，自动分配 IP
+
+server 指定一个子网，client 加 `--tun` 即可，**无需手动配 IP**。server 自动从子网中分配未使用的 IP。需要 root 权限。
+
+```
+client_a (自动分配 10.0.0.2)  ←── TUN ──→  server  ←── TUN ──→  client_b (自动分配 10.0.0.3)
+```
+
+```bash
+# server 指定子网（+ token 鉴权，推荐）
+server$ ./tunnel_server 7000 -t "my_token" --tun-subnet 10.0.0.0/24
+
+# client 只需 --tun + token，无需指定 IP
+client_A$ sudo ./tunnel_client <SERVER_IP> 7000 -n node_a -t "my_token" --tun
+client_B$ sudo ./tunnel_client <SERVER_IP> 7000 -n node_b -t "my_token" --tun
+
+# server 自动分配：node_a→10.0.0.2, node_b→10.0.0.3
+# 同一 token 的所有 client 自动进入同一子网
+# 然后可以直接 ping、SSH
+ping 10.0.0.3
+ssh user@10.0.0.2
+```
+
+### Token 鉴权（-t）
+
+防止未授权的 client 接入 server。**server 和所有 client 共享同一个 token**。
+
+**生成 token**（推荐 16 字符以上随机字符串）：
+
+```bash
+# 生成随机 token
+openssl rand -base64 16          # 例: xG8kP2vL9nQ4mR7sA==
+openssl rand -hex 16             # 例: a3f2c89b1e4d5f7a0b2c3d4e5f6a7b8c
+```
+
+**工作原理**：
+
+```
+client ──TCP连接──► server
+client ──AUTH{token}──► server ──token 正确→ ACK(ok) → 后续正常通信（含 TUN 分配）
+                                  token 错误→ 断开连接 → client 自动重连
+```
+
+**配置方式（三种等价，选一种）**：
+
+```bash
+# 方式 A：命令行参数
+server$  ./tunnel_server 7000 -t "xG8kP2vL9nQ4mR7sA=="
+client$  ./tunnel_client <IP> 7000 -n host -L 22:10022 -t "xG8kP2vL9nQ4mR7sA=="
+
+# 方式 B：配置文件 (推荐，不泄密)
+# server.conf         client.conf
+# token = xG8k...      token = xG8k...
+server$  ./tunnel_server 7000 -c server.conf
+client$  ./tunnel_client <IP> 7000 -c client.conf
+
+# 方式 C：同时使用 token + TUN 组网
+server$  ./tunnel_server 7000 -t "xG8k..." --tun-subnet 10.0.0.0/24
+client$  sudo ./tunnel_client <IP> 7000 -n node_a -t "xG8k..." --tun
+# ↑ token 正确才分配 IP，同 token 的所有 client 自动划入同一子网
+```
+
+**行为说明**：
+
+| 场景 | 结果 |
+|------|------|
+| client 带正确 token | ✅ AUTH 通过，正常通信 |
+| client 带错误 token | ❌ server 断开连接，client 每 5s 重试 |
+| client 不带 token（server 需要） | ❌ 第一条非 AUTH 消息就触发断开 |
+| server 不设 token（`-t` 省略） | 所有 client 跳过鉴权，直接通信 |
+
+**安全性**：token 在 AUTH 帧中以**明文**传输（帧 payload 未加密）。如果担心 token 被网络抓包，建议同时启用 **-k 加密**（下一节），所有帧 payload 被 AES 加密，token 自然也被保护。
+
+### AES-256-GCM 加密（-k）
+
+对所有帧的 payload（含控制消息和用户数据）进行加密，保护传输内容不被窃听或篡改。
+
+**密钥要求**：任意字符串，server 和所有 client 必须一致。
+
+```bash
+# 生成密钥
+openssl rand -base64 32    # 32 字节随机密钥
+```
+
+**工作原理**：
+
+```
+原始 payload ──AES-256-GCM──► nonce(12B) + ciphertext + tag(16B)
+                           密钥 = SHA256(原始字符串)
+                           每帧随机 nonce，防止重放攻击
+                           tag 提供完整性校验（篡改即检测）
+```
+
+**配置**：
+
+```bash
+server$  ./tunnel_server 7000 -t my_token -k "my_secret_key"
+client$  ./tunnel_client <IP> 7000 -t my_token -k "my_secret_key" ...
+```
+
+**性能影响**：每帧多 28 字节（nonce 12 + tag 16），加解密耗时微秒级（AES-NI 硬件加速）。
+
+### 鉴权 + 加密 推荐配置
+
+建议 **同时启用 -t 和 -k**，安全级别最高：
+
+```bash
+# server（配置文件：server.conf）
+port  = 7000
+token = xG8kP2vL9nQ4mR7
+key   = jF6bD3sA1wE5tY9
+
+# client（配置文件：client.conf）
+server_ip   = 1.2.3.4
+server_port = 7000
+name        = my_host
+token       = xG8kP2vL9nQ4mR7
+key         = jF6bD3sA1wE5tY9
+mappings    = 22:10022
+```
+
 ## 参数说明
 
 ### tunnel_server
 
 ```
-tunnel_server [control_port] [-d]
+tunnel_server [control_port] [-t token] [-k secret] [-c config] [-d]
 ```
 
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
 | `control_port` | 控制隧道端口 | 7000 |
+| `-t token` | 鉴权 token（所有 client 须一致） | 无（不鉴权） |
+| `-k secret` | AES-256-GCM 加密密钥（所有 client 须一致） | 无（不加密） |
+| `-c config` | 配置文件路径 | — |
+| `--tun-subnet 10.0.0.0/24` | TUN 子网，server 从此子网自动分配 IP | 无（不启用 TUN） |
 | `-d` | 开启 DEBUG 级别日志 | INFO |
 
 ### tunnel_client
 
 ```
-tunnel_client <server_ip> [server_port] [-n name] [-L local:remote] [-R local:target:port] [-C target:port] [-d]
+tunnel_client <server_ip> [server_port] [-n name] [-L local:remote] [-R local:target:port] [-C target:port] [-i tun_ip] [-t token] [-k secret] [-c config] [-d]
 ```
 
 | 参数 | 说明 | 默认值 |
@@ -209,9 +334,13 @@ tunnel_client <server_ip> [server_port] [-n name] [-L local:remote] [-R local:ta
 | `server_ip` | 公网 server 的 IP（必填） | — |
 | `server_port` | 控制隧道端口 | 7000 |
 | `-n name` | client 名字，用于中继路由和探活 | 空 |
-| `-L local:remote` | 端口映射（可多个）：暴露本地端口到 server 公网 | — |
-| `-R local:target:port` | 本地中继（可多个）：本地监听, 收到连接后中继到目标 client | — |
-| `-C target:port` | 启动后自动发起中继连接到目标 client | — |
+| `-L local:remote` | 端口映射（可多个） | — |
+| `-R local:target:port` | 本地中继（可多个） | — |
+| `-C target:port` | 启动后自动中继连接 | — |
+| `--tun` | 启用 TUN 虚拟网卡（server 自动分配 IP，需 sudo） | 不启用 |
+| `-t token` | 鉴权 token（与 server 一致） | 无 |
+| `-k secret` | AES-256-GCM 加密密钥（与 server 一致） | 无 |
+| `-c config` | 配置文件路径 | — |
 | `-d` | 开启 DEBUG 级别日志 | INFO |
 
 ## 完整示例
@@ -291,6 +420,9 @@ B$ ssh -p 10022 user@127.0.0.1   # 直接 SSH！
 | ACK | 0x07 | server→client | 通用应答 |
 | PROBE | 0x08 | client→server→client | 链路探活 |
 | PROBE_REPLY | 0x09 | client→server→client | 探活应答 |
+| AUTH | 0x0F | client→server | token 鉴权 |
+| P2P_TRY/P2P_PORT/P2P_INFO/P2P_OK/P2P_FAIL | 0x0A~0x0E | 双向 | P2P 打洞协商 |
+| TUN_PACKET | 0x10 | 双向 | TUN 虚拟网卡 IP 包 |
 
 ## 构建
 
@@ -311,3 +443,75 @@ bash ninja_build.sh debug      # Debug 模式
 3. **端口冲突**：两个 client 注册相同 remote_port 时，后注册的被拒绝
 4. **名字冲突**：两个 client 注册相同名字时，后注册的被拒绝
 5. **非阻塞**：所有 socket 均为非阻塞 + epoll ET 模式
+
+## 配置文件
+
+支持通过 `key=value` 格式的配置文件简化启动参数：
+
+```bash
+# server
+./tunnel_server -c server.conf
+
+# client
+./tunnel_client -c client.conf
+```
+
+命令行参数优先级高于配置文件（即 `-t` 会覆盖配置文件中的 `token` 值）。
+
+### server 配置示例 (`server.conf`)
+
+```ini
+port  = 7000          # 控制端口
+token = my_token      # 鉴权 (可选)
+key   = my_secret     # 加密 (可选)
+```
+
+### client 配置示例 (`client.conf`)
+
+```ini
+server_ip   = 1.2.3.4       # server 公网 IP
+server_port = 7000          # 控制端口
+name        = my_client     # client 名字
+token       = my_token      # 鉴权 (可选)
+key         = my_secret     # 加密 (可选)
+mappings    = 22:10022      # 端口映射，多个用逗号分隔
+tun         = true          # 启用 TUN 虚拟网卡 (可选)
+```
+
+## 部署
+
+### 安装
+
+```bash
+# 复制二进制文件
+sudo cp build/tunnel/tunnel_server /usr/local/bin/
+sudo cp build/tunnel/tunnel_client /usr/local/bin/
+
+# 创建配置目录
+sudo mkdir -p /etc/tunnel
+sudo cp tunnel/server.conf.example /etc/tunnel/server.conf
+sudo cp tunnel/client.conf.example /etc/tunnel/client.conf
+# 编辑配置文件
+
+# 安装 systemd 服务
+sudo cp tunnel/tunnel_server.service /etc/systemd/system/
+sudo cp tunnel/tunnel_client.service /etc/systemd/system/
+sudo systemctl daemon-reload
+```
+
+### 启动
+
+```bash
+# server
+sudo systemctl enable --now tunnel_server
+
+# client
+sudo systemctl enable --now tunnel_client
+```
+
+### 查看日志
+
+```bash
+journalctl -u tunnel_server -f
+journalctl -u tunnel_client -f
+```
