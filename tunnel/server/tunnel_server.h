@@ -39,13 +39,17 @@ struct TunnelSession {
 // 公网中继/协调服务端。
 class TunnelServer {
 public:
-    explicit TunnelServer(uint16_t control_port, const std::string& token = "");
+    explicit TunnelServer(uint16_t control_port, const std::string& token = "",
+                          const std::string& tun_subnet = "");
     ~TunnelServer();
 
     TunnelServer(const TunnelServer&) = delete;
     TunnelServer& operator=(const TunnelServer&) = delete;
 
     void Run();
+
+    // 分配一个未使用的 TUN IP。返回 0 表示无可用 IP。
+    uint32_t AllocateTunIp();
 
     // 向指定隧道 fd 发送一帧。供 PortMapper 调用。
     void SendFrame(int tunnel_fd, std::string frame_bytes);
@@ -78,6 +82,8 @@ private:
     int      listen_fd_;
     int      epfd_;
     std::string token_;  // 鉴权 token (空=不需要)
+    uint32_t tun_subnet_base_ = 0;  // TUN 子网基地址 (网络字节序, 0=不启用)
+    uint32_t tun_subnet_mask_ = 0;  // 子网掩码
 
     // fd -> 隧道会话
     std::unordered_map<int, std::unique_ptr<TunnelSession>> sessions_;

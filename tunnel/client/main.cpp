@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "../common/logger.h"
+#include "../common/config.h"
 #include "../common/crypto.h"
 #include "../common/frame.h"
 #include "tunnel_client.h"
@@ -38,7 +39,8 @@ int main(int argc, char** argv) {
     std::string auto_connect;
     std::string secret;
     std::string token;
-    std::string tun_ip;
+    bool tun_enabled = false;
+    std::string config_file;
 
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "-d") == 0 || std::strcmp(argv[i], "--debug") == 0) {
@@ -53,9 +55,12 @@ int main(int argc, char** argv) {
             if (i + 1 >= argc) { fprintf(stderr, "-t requires argument\n"); return 1; }
             ++i; token = argv[i]; continue;
         }
-        if (std::strcmp(argv[i], "-i") == 0) {
-            if (i + 1 >= argc) { fprintf(stderr, "-i requires argument\n"); return 1; }
-            ++i; tun_ip = argv[i]; continue;
+        if (std::strcmp(argv[i], "-i") == 0 || std::strcmp(argv[i], "--tun") == 0) {
+            tun_enabled = true; continue;
+        }
+        if (std::strcmp(argv[i], "-c") == 0) {
+            if (i + 1 >= argc) { fprintf(stderr, "-c requires argument\n"); return 1; }
+            ++i; config_file = argv[i]; continue;
         }
         if (std::strcmp(argv[i], "-n") == 0) {
             if (i + 1 >= argc) {
@@ -147,6 +152,34 @@ int main(int argc, char** argv) {
             got_port = true;
         }
     }
+    // 加载配置文件 (命令行参数优先)
+    if (!config_file.empty()) {
+        tunnel::Config cfg;
+        if (cfg.LoadFromFile(config_file)) {
+            if (server_ip.empty()) server_ip = cfg.Get("server_ip");
+            if (!got_port && cfg.HasKey("server_port"))
+                server_port = static_cast<uint16_t>(std::atoi(cfg.Get("server_port").c_str()));
+            if (name.empty()) name = cfg.Get("name");
+            if (token.empty()) token = cfg.Get("token");
+            if (secret.empty()) secret = cfg.Get("key");
+            if (!tun_enabled && cfg.HasKey("tun")) tun_enabled = (cfg.Get("tun") == "true" || cfg.Get("tun") == "1");
+            if (auto_connect.empty()) auto_connect = cfg.Get("auto_connect");
+            if (mappings.empty() && cfg.HasKey("mappings")) {
+                std::string ml = cfg.Get("mappings");
+                size_t pos = 0;
+                while (pos < ml.size()) {
+                    size_t comma = ml.find(',', pos);
+                    std::string entry = (comma == std::string::npos) ? ml.substr(pos) : ml.substr(pos, comma-pos);
+                    size_t col = entry.find(':');
+                    if (col != std::string::npos) mappings.emplace_back(
+                        static_cast<uint16_t>(std::atoi(entry.c_str())),
+                        static_cast<uint16_t>(std::atoi(entry.substr(col+1).c_str())));
+                    if (comma == std::string::npos) break;
+                    pos = comma + 1;
+                }
+            }
+        }
+    }
     if (server_ip.empty()) {
         fprintf(stderr, "usage: %s <server_ip> [server_port] [-n name] [-L local:remote] [-R local:target:port] [-C target:port] [-d]\n",
                 argv[0]);
@@ -161,7 +194,7 @@ int main(int argc, char** argv) {
         LOG_INFO("encryption enabled (AES-256-GCM)");
     }
 
-    tunnel::client::TunnelClient client(server_ip, server_port, mappings, name, auto_connect, relay_listens, token, tun_ip);
+    tunnel::client::TunnelClient client(server_ip, server_port, mappings, name, auto_connect, relay_listens, token, tun_enabled);
     client.Run();
 
     LOG_INFO("tunnel client exit");

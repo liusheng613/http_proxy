@@ -1,0 +1,17 @@
+[Unit]
+Description=Tunnel Client - 内网穿透组网客户端
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/tunnel_client -c /etc/tunnel/client.conf
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# 如果使用 TUN 虚拟网卡, 需要 root 或以下权限:
+# AmbientCapabilities=CAP_NET_ADMIN
+
+[Install]
+WantedBy=multi-user.target

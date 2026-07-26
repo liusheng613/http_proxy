@@ -20,8 +20,30 @@ constexpr int kMaxEvents = 1024;
 constexpr int kHeartbeatTimeoutSec = 30;
 }
 
-TunnelServer::TunnelServer(uint16_t control_port, const std::string& token)
-    : control_port_(control_port), token_(token), listen_fd_(-1), epfd_(-1) {}
+TunnelServer::TunnelServer(uint16_t control_port, const std::string& token,
+                          const std::string& tun_subnet)
+    : control_port_(control_port), token_(token), listen_fd_(-1), epfd_(-1) {
+    if (!tun_subnet.empty()) {
+        // 解析 "10.0.0.0/24" 格式
+        size_t slash = tun_subnet.find('/');
+        if (slash != std::string::npos) {
+            inet_pton(AF_INET, tun_subnet.substr(0, slash).c_str(), &tun_subnet_base_);
+            int prefix = std::atoi(tun_subnet.substr(slash + 1).c_str());
+            tun_subnet_mask_ = htonl((prefix == 0) ? 0 : (~0u << (32 - prefix)));
+            LOG_INFO("TUN subnet: %s", tun_subnet.c_str());
+        }
+    }
+}
+
+uint32_t TunnelServer::AllocateTunIp() {
+    if (tun_subnet_base_ == 0) return 0;
+    uint32_t base = ntohl(tun_subnet_base_);
+    for (uint32_t host = 2; host < 255; ++host) {
+        uint32_t ip = htonl(base + host);
+        if (!ip_to_tunnel_.count(ip)) return ip;
+    }
+    return 0;
+}
 
 TunnelServer::~TunnelServer() { Cleanup(); }
 
@@ -339,13 +361,19 @@ void TunnelServer::HandleFrame(int fd, const Frame& frame) {
                     ip_to_tunnel_[ip] = fd;
                     LOG_INFO("fd=%d REGISTER name='%s' ip=%u.%u.%u.%u", fd, name.c_str(),
                              (ip>>24)&0xFF, (ip>>16)&0xFF, (ip>>8)&0xFF, ip&0xFF);
-                } else {
-                    LOG_INFO("fd=%d REGISTER name='%s'", fd, name.c_str());
                 }
-                // 发 ACK(成功) 给 client
-                std::string ack = FrameBuilder(MessageType::ACK)
-                                      .AppendU8(0)  // code=0 表示成功
-                                      .Build();
+                // 发 ACK, 附加 TUN IP (如果有)
+                std::string ack = FrameBuilder(MessageType::ACK).AppendU8(0).Build();
+                if (tun_subnet_base_ != 0) {
+                    uint32_t assigned_ip = (ip != 0) ? ip : AllocateTunIp();
+                    if (assigned_ip != 0) {
+                        ip_to_tunnel_[assigned_ip] = fd;
+                        ack = FrameBuilder(MessageType::ACK)
+                                  .AppendU8(0).AppendU32(assigned_ip).Build();
+                LOG_INFO("fd=%d REGISTER name='%s' tun_ip=%s",
+                         fd, name.c_str(), inet_ntoa(*reinterpret_cast<in_addr*>(&assigned_ip)));
+                    }
+                }
                 sess.writer.Append(std::move(ack));
                 sess.writer.Flush(fd);
             }

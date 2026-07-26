@@ -36,7 +36,7 @@ public:
                  const std::string& auto_connect = "",
                  const std::vector<LocalRelayConfig>& relay_listens = {},
                  const std::string& token = "",
-                 const std::string& tun_ip = "");
+                 bool tun_enabled = false);
     ~TunnelClient();
 
     TunnelClient(const TunnelClient&) = delete;
@@ -114,7 +114,8 @@ private:
     std::string auto_connect_target_; // 启动后自动连接的目标 "name:port"
     std::vector<LocalRelayConfig> relay_listens_; // 本地中继监听配置
     std::string token_;  // 鉴权 token (空=不鉴权)
-    std::string tun_ip_;  // TUN 虚拟 IP (空=不启用)
+    bool tun_enabled_ = false;  // 启用 TUN (server 自动分配 IP)
+    in_addr tun_assigned_ip_ = {};  // server 分配的 IP
     int tun_fd_ = -1;     // TUN 设备 fd
 
     int tunnel_fd_;

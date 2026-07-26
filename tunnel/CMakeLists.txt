@@ -8,6 +8,7 @@ add_library(tunnel_common STATIC
     common/write_buffer.cpp
     common/crypto.cpp
     common/tun.cpp
+    common/config.cpp
 )
 target_include_directories(tunnel_common PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_include_directories(tunnel_common PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/common)

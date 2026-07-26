@@ -27,10 +27,10 @@ TunnelClient::TunnelClient(const std::string& server_ip, uint16_t server_port,
                            const std::string& auto_connect,
                            const std::vector<LocalRelayConfig>& relay_listens,
                            const std::string& token,
-                           const std::string& tun_ip)
+                           bool tun_enabled)
     : server_ip_(server_ip), server_port_(server_port),
       mappings_(mappings), name_(name), auto_connect_target_(auto_connect),
-      relay_listens_(relay_listens), token_(token), tun_ip_(tun_ip),
+      relay_listens_(relay_listens), token_(token), tun_enabled_(tun_enabled),
       tunnel_fd_(-1), epfd_(-1), connected_(false),
       last_send_heartbeat_(0), last_recv_heartbeat_(0), active_relay_sid_(0) {}
 
@@ -145,7 +145,6 @@ void TunnelClient::HandleTunnelWritable() {
         }
         SendPortMap();
         SetupLocalRelayListeners();
-        SetupTun();
         SendHeartbeat();
     }
 
@@ -297,7 +296,7 @@ void TunnelClient::HandleFrame(const Frame& frame) {
             break;
 
         case MessageType::ACK:
-            // server 对 REGISTER 的应答: { uint8 code; }  0=成功, 1=名字被占用
+            // server 对 REGISTER 的应答: { uint8 code; uint32 tun_ip(可选); }
             if (frame.payload.size() < 1) {
                 LOG_WARN("ACK payload too short");
                 break;
@@ -306,6 +305,14 @@ void TunnelClient::HandleFrame(const Frame& frame) {
                 uint8_t code = static_cast<uint8_t>(frame.payload[0]);
                 if (code == 0) {
                     LOG_INFO("REGISTER success (name='%s')", name_.c_str());
+                    // 解析 server 分配的 TUN IP
+                    if (tun_enabled_ && frame.payload.size() >= 5) {
+                        uint32_t assigned_ip = *reinterpret_cast<const uint32_t*>(&frame.payload[1]);
+                        struct in_addr ia; ia.s_addr = assigned_ip;
+                        tun_assigned_ip_ = ia;
+                        LOG_INFO("TUN IP assigned: %s", inet_ntoa(ia));
+                        SetupTun();  // 拿到 IP 后再创建 TUN
+                    }
                     // 注册成功后, 如果有自动中继目标, 发起连接
                     if (!auto_connect_target_.empty()) {
                         auto colon = auto_connect_target_.find(':');
@@ -407,14 +414,12 @@ void TunnelClient::SendRegister() {
     builder.AppendStr(name_);
     // 解析 IP 字符串为 uint32
     uint32_t ip = 0;
-    if (!tun_ip_.empty()) {
-        inet_pton(AF_INET, tun_ip_.c_str(), &ip);
-    }
-    builder.AppendU32(ntohl(ip));  // 已经是 host byte order, encode_frame_header 会转
+    if (tun_enabled_) ip = 0;  // 0 = 请求 server 自动分配
+    builder.AppendU32(ntohl(ip));
     std::string frame = builder.Build();
     writer_.Append(std::move(frame));
     writer_.Flush(tunnel_fd_);
-    LOG_INFO("sent REGISTER (name='%s', ip=%s)", name_.c_str(), tun_ip_.c_str());
+    LOG_INFO("sent REGISTER (name='%s', tun=%s)", name_.c_str(), tun_enabled_ ? "yes" : "no");
 }
 
 void TunnelClient::SendPortMap() {
@@ -864,11 +869,11 @@ void TunnelClient::SetupLocalRelayListeners() {
 }
 
 void TunnelClient::SetupTun() {
-    if (tun_ip_.empty()) return;
+    if (!tun_enabled_ || tun_assigned_ip_.s_addr == 0) return;
     tun_fd_ = tun::create("tun%d");
     if (tun_fd_ < 0) {
         LOG_ERROR("TUN device creation failed, TUN disabled");
-        tun_ip_.clear();
+        tun_enabled_ = false;
         return;
     }
     // 获取设备名
@@ -879,14 +884,15 @@ void TunnelClient::SetupTun() {
     net::set_nonblock(tun_fd_);
 
     // 配置 IP + 路由 (需要 root)
-    tun::set_ip(dev_name, tun_ip_, 24);
+    std::string ip_str = inet_ntoa(tun_assigned_ip_);
+    tun::set_ip(dev_name, ip_str, 24);
     tun::add_route("10.0.0.0/24", dev_name);
 
     epoll_event ev{};
     ev.events = EPOLLIN | EPOLLET;
     ev.data.fd = tun_fd_;
     epoll_ctl(epfd_, EPOLL_CTL_ADD, tun_fd_, &ev);
-    LOG_INFO("TUN ready: %s -> %s", dev_name.c_str(), tun_ip_.c_str());
+    LOG_INFO("TUN ready: %s -> %s", dev_name.c_str(), ip_str.c_str());
 }
 
 void TunnelClient::HandleTunReadable() {

@@ -1,0 +1,14 @@
+# tunnel_server 配置文件示例
+# 用法: tunnel_server -c server.conf
+
+# 控制端口 (默认 7000)
+port = 7000
+
+# 鉴权 token (可选, 所有 client 须一致)
+token = my_shared_token
+
+# AES 加密密钥 (可选, 所有 client 须一致)
+key = my_secret_key
+
+# TUN 虚拟网卡子网 (可选, server 自动从此子网分配 IP 给 client)
+# tun_subnet = 10.0.0.0/24

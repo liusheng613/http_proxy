@@ -1,0 +1,26 @@
+# tunnel_client 配置文件示例
+# 用法: tunnel_client -c client.conf
+
+# 公网 server IP (必填, 命令行第一个参数也可以)
+server_ip = 1.2.3.4
+
+# server 控制端口 (默认 7000)
+server_port = 7000
+
+# client 名字 (用于注册和路由)
+name = my_client
+
+# 鉴权 token (与 server 端一致)
+token = my_shared_token
+
+# AES 加密密钥 (与 server 端一致, 可选)
+key = my_secret_key
+
+# 端口映射: "本地端口:远程端口", 多个用逗号分隔
+mappings = 22:10022,8080:18080
+
+# TUN 虚拟网卡 (可选, server 自动分配 IP, 需 sudo 运行)
+tun = true
+
+# 自动中继连接 (可选)
+# auto_connect = target_client:22

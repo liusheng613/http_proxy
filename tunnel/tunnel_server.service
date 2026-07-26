@@ -1,0 +1,14 @@
+[Unit]
+Description=Tunnel Server - 内网穿透组网服务端
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/tunnel_server -c /etc/tunnel/server.conf
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

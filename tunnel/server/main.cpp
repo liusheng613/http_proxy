@@ -4,26 +4,25 @@
 #include <cstring>
 #include <string>
 
+#include "../common/config.h"
 #include "../common/crypto.h"
 #include "../common/frame.h"
 #include "../common/logger.h"
 #include "tunnel_server.h"
 
-// 用法: tunnel_server [control_port] [-t token] [-k secret] [-d]
-//   control_port: 控制端口 (默认 7000)
-//   -t token:    鉴权 token (未指定则不鉴权)
-//   -k secret:   AES-256 加密密钥 (未指定则不加密)
-//   -d:          开启 DEBUG 日志
+// 用法: tunnel_server [port] [-t token] [-k secret] [-c config] [-d]
 int main(int argc, char** argv) {
     ::signal(SIGPIPE, SIG_IGN);
 
     uint16_t control_port = 7000;
     std::string secret;
     std::string token;
+    std::string config_file;
+    std::string tun_subnet;
+
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "-d") == 0 || std::strcmp(argv[i], "--debug") == 0) {
-            tunnel::set_log_level(tunnel::LOG_DEBUG);
-            continue;
+            tunnel::set_log_level(tunnel::LOG_DEBUG); continue;
         }
         if (std::strcmp(argv[i], "-k") == 0) {
             if (i + 1 >= argc) { fprintf(stderr, "-k requires argument\n"); return 1; }
@@ -33,27 +32,40 @@ int main(int argc, char** argv) {
             if (i + 1 >= argc) { fprintf(stderr, "-t requires argument\n"); return 1; }
             ++i; token = argv[i]; continue;
         }
-        int p = std::atoi(argv[i]);
-        if (p <= 0 || p > 65535) {
-            fprintf(stderr, "invalid control port: %s\n", argv[i]);
-            return 1;
+        if (std::strcmp(argv[i], "-c") == 0) {
+            if (i + 1 >= argc) { fprintf(stderr, "-c requires argument\n"); return 1; }
+            ++i; config_file = argv[i]; continue;
         }
+        if (std::strcmp(argv[i], "--tun-subnet") == 0) {
+            if (i + 1 >= argc) { fprintf(stderr, "--tun-subnet requires argument\n"); return 1; }
+            ++i; tun_subnet = argv[i]; continue;
+        }
+        int p = std::atoi(argv[i]);
+        if (p <= 0 || p > 65535) { fprintf(stderr, "invalid port: %s\n", argv[i]); return 1; }
         control_port = static_cast<uint16_t>(p);
+    }
+
+    // 加载配置文件 (命令行参数优先)
+    if (!config_file.empty()) {
+        tunnel::Config cfg;
+        if (cfg.LoadFromFile(config_file)) {
+            if (control_port == 7000 && cfg.HasKey("port"))
+                control_port = static_cast<uint16_t>(std::atoi(cfg.Get("port").c_str()));
+            if (token.empty()) token = cfg.Get("token");
+            if (secret.empty()) secret = cfg.Get("key");
+            if (tun_subnet.empty()) tun_subnet = cfg.Get("tun_subnet");
+        }
     }
 
     if (!secret.empty()) {
         tunnel::tunnel_set_crypto_key(tunnel::crypto::derive_key(secret));
         LOG_INFO("encryption enabled (AES-256-GCM)");
     }
-    if (!token.empty()) {
-        LOG_INFO("token auth enabled");
-    }
+    if (!token.empty()) LOG_INFO("token auth enabled");
 
     LOG_INFO("tunnel server starting (port=%u)", control_port);
-
-    tunnel::server::TunnelServer server(control_port, token);
+    tunnel::server::TunnelServer server(control_port, token, tun_subnet);
     server.Run();
-
     LOG_INFO("tunnel server exit");
     return 0;
 }
