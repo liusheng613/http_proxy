@@ -39,8 +39,9 @@ uint32_t TunnelServer::AllocateTunIp() {
     if (tun_subnet_base_ == 0) return 0;
     uint32_t base = ntohl(tun_subnet_base_);
     for (uint32_t host = 2; host < 255; ++host) {
-        uint32_t ip = htonl(base + host);
-        if (!ip_to_tunnel_.count(ip)) return ip;
+        uint32_t ip_host = base + host;               // host byte order
+        uint32_t ip_net = htonl(ip_host);             // network byte order (for map lookup)
+        if (!ip_to_tunnel_.count(ip_net)) return ip_host;  // return HOST order
     }
     return 0;
 }

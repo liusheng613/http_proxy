@@ -1,2 +1,4 @@
 build
 *.o
+tunnel_client.conf
+tunnel_server.conf

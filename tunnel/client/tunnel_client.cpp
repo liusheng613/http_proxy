@@ -93,9 +93,14 @@ void TunnelClient::Disconnect() {
 
     // 关闭 TUN 设备
     if (tun_fd_ >= 0) {
+        if (!tun_dev_name_.empty()) {
+            std::string cmd = "ip link del " + tun_dev_name_ + " 2>/dev/null";
+            if (system(cmd.c_str()) != 0) {}  // ignore failure
+        }
         epoll_ctl(epfd_, EPOLL_CTL_DEL, tun_fd_, nullptr);
         close(tun_fd_);
         tun_fd_ = -1;
+        tun_dev_name_.clear();
     }
 
     // 清理 pending relay user fd
@@ -874,6 +879,7 @@ void TunnelClient::SetupLocalRelayListeners() {
 
 void TunnelClient::SetupTun() {
     if (!tun_enabled_ || tun_assigned_ip_.s_addr == 0) return;
+    if (tun_fd_ >= 0) return;  // 已创建，重连后不重复创建
     tun_fd_ = tun::create("tun%d");
     if (tun_fd_ < 0) {
         LOG_ERROR("TUN device creation failed, TUN disabled");
@@ -884,19 +890,19 @@ void TunnelClient::SetupTun() {
     ifreq ifr{};
     std::strncpy(ifr.ifr_name, "tun%d", IFNAMSIZ - 1);
     ioctl(tun_fd_, TUNGETIFF, &ifr);
-    std::string dev_name = ifr.ifr_name;
+    tun_dev_name_ = ifr.ifr_name;
     net::set_nonblock(tun_fd_);
 
     // 配置 IP + 路由 (需要 root)
     std::string ip_str = inet_ntoa(tun_assigned_ip_);
-    tun::set_ip(dev_name, ip_str, 24);
-    tun::add_route("10.0.0.0/24", dev_name);
+    tun::set_ip(tun_dev_name_, ip_str, 24);
+    tun::add_route("10.0.0.0/24", tun_dev_name_);
 
     epoll_event ev{};
     ev.events = EPOLLIN | EPOLLET;
     ev.data.fd = tun_fd_;
     epoll_ctl(epfd_, EPOLL_CTL_ADD, tun_fd_, &ev);
-    LOG_INFO("TUN ready: %s -> %s", dev_name.c_str(), ip_str.c_str());
+    LOG_INFO("TUN ready: %s -> %s", tun_dev_name_.c_str(), ip_str.c_str());
 }
 
 void TunnelClient::HandleTunReadable() {

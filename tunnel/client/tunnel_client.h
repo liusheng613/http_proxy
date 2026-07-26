@@ -116,6 +116,7 @@ private:
     std::string token_;  // 鉴权 token (空=不鉴权)
     bool tun_enabled_ = false;  // 启用 TUN (server 自动分配 IP)
     in_addr tun_assigned_ip_ = {};  // server 分配的 IP
+    std::string tun_dev_name_;  // TUN 设备名 (用于清理)
     int tun_fd_ = -1;     // TUN 设备 fd
 
     int tunnel_fd_;
