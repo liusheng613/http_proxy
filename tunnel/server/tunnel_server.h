@@ -5,6 +5,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "../common/frame.h"
 #include "../common/protocol.h"
@@ -38,7 +39,7 @@ struct TunnelSession {
 // 公网中继/协调服务端。
 class TunnelServer {
 public:
-    explicit TunnelServer(uint16_t control_port);
+    explicit TunnelServer(uint16_t control_port, const std::string& token = "");
     ~TunnelServer();
 
     TunnelServer(const TunnelServer&) = delete;
@@ -76,9 +77,13 @@ private:
     uint16_t control_port_;
     int      listen_fd_;
     int      epfd_;
+    std::string token_;  // 鉴权 token (空=不需要)
 
     // fd -> 隧道会话
     std::unordered_map<int, std::unique_ptr<TunnelSession>> sessions_;
+
+    // 尚未通过 AUTH 的 fd (空 token 时永远为空)
+    std::unordered_set<int> auth_pending_;
 
     // 快速查找: user_fd -> tunnel_fd (跨 session 定位)
     std::unordered_map<int, int> user_to_tunnel_;

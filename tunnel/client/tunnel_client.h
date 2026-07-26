@@ -34,7 +34,8 @@ public:
                  const std::vector<PortMapping>& mappings,
                  const std::string& name = "",
                  const std::string& auto_connect = "",
-                 const std::vector<LocalRelayConfig>& relay_listens = {});
+                 const std::vector<LocalRelayConfig>& relay_listens = {},
+                 const std::string& token = "");
     ~TunnelClient();
 
     TunnelClient(const TunnelClient&) = delete;
@@ -59,6 +60,8 @@ private:
     // 连接成功后发 REGISTER + PORT_MAP
     void SendRegister();
     void SendPortMap();
+    // 发送 AUTH 鉴权帧
+    void SendAuth();
 
     // 收到 NEW_CONN: 连接本地服务, 加入 epoll。
     void HandleNewConn(uint32_t session_id, uint16_t local_port);
@@ -105,6 +108,7 @@ private:
     std::string name_;  // client 名字 (可选, 用于 PROBE 路由)
     std::string auto_connect_target_; // 启动后自动连接的目标 "name:port"
     std::vector<LocalRelayConfig> relay_listens_; // 本地中继监听配置
+    std::string token_;  // 鉴权 token (空=不鉴权)
 
     int tunnel_fd_;
     int epfd_;

@@ -87,6 +87,9 @@ enum class MessageType : uint8_t {
 
     // P2P 失败: client 通知 server 打洞失败, 回退中继。payload: { uint32 session_id; }
     P2P_FAIL = 0x0E,
+
+    // Token 鉴权: client 连接后立即发送。payload: { uint8 token_len; char token[token_len]; }
+    AUTH = 0x0F,
 };
 
 inline const char* msg_type_str(MessageType t) {
@@ -105,6 +108,7 @@ inline const char* msg_type_str(MessageType t) {
         case MessageType::P2P_INFO: return "P2P_INFO";
         case MessageType::P2P_OK:   return "P2P_OK";
         case MessageType::P2P_FAIL: return "P2P_FAIL";
+        case MessageType::AUTH:     return "AUTH";
     }
     return "UNKNOWN";
 }

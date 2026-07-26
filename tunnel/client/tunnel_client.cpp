@@ -24,10 +24,11 @@ TunnelClient::TunnelClient(const std::string& server_ip, uint16_t server_port,
                            const std::vector<PortMapping>& mappings,
                            const std::string& name,
                            const std::string& auto_connect,
-                           const std::vector<LocalRelayConfig>& relay_listens)
+                           const std::vector<LocalRelayConfig>& relay_listens,
+                           const std::string& token)
     : server_ip_(server_ip), server_port_(server_port),
       mappings_(mappings), name_(name), auto_connect_target_(auto_connect),
-      relay_listens_(relay_listens),
+      relay_listens_(relay_listens), token_(token),
       tunnel_fd_(-1), epfd_(-1), connected_(false),
       last_send_heartbeat_(0), last_recv_heartbeat_(0), active_relay_sid_(0) {}
 
@@ -126,7 +127,10 @@ void TunnelClient::HandleTunnelWritable() {
                  server_port_, tunnel_fd_);
         last_recv_heartbeat_ = time(nullptr);
 
-        // 连接成功, 先注册名字 (如果有), 再发端口映射, 设置本地中继, 最后发心跳
+        // 连接成功, 先鉴权, 再注册, 再端口映射, 设置本地中继, 最后心跳
+        if (!token_.empty()) {
+            SendAuth();
+        }
         if (!name_.empty()) {
             SendRegister();
         }
@@ -366,6 +370,17 @@ void TunnelClient::HandleFrame(const Frame& frame) {
                      msg_type_str(frame.type), frame.payload.size());
             break;
     }
+}
+
+void TunnelClient::SendAuth() {
+    if (token_.empty()) return;
+    FrameBuilder builder(MessageType::AUTH);
+    builder.AppendU8(static_cast<uint8_t>(token_.size()));
+    builder.AppendStr(token_);
+    std::string frame = builder.Build();
+    writer_.Append(std::move(frame));
+    writer_.Flush(tunnel_fd_);
+    LOG_INFO("sent AUTH");
 }
 
 void TunnelClient::SendRegister() {

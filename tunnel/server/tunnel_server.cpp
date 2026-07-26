@@ -20,8 +20,8 @@ constexpr int kMaxEvents = 1024;
 constexpr int kHeartbeatTimeoutSec = 30;
 }
 
-TunnelServer::TunnelServer(uint16_t control_port)
-    : control_port_(control_port), listen_fd_(-1), epfd_(-1) {}
+TunnelServer::TunnelServer(uint16_t control_port, const std::string& token)
+    : control_port_(control_port), token_(token), listen_fd_(-1), epfd_(-1) {}
 
 TunnelServer::~TunnelServer() { Cleanup(); }
 
@@ -88,6 +88,10 @@ void TunnelServer::HandleAccept() {
         sess->last_recv_heartbeat = time(nullptr);
         sess->mapper.SetContext(epfd_, this, fd);
         sessions_[fd] = std::move(sess);
+        if (!token_.empty()) {
+            auth_pending_.insert(fd);
+            LOG_DEBUG("fd=%d awaiting AUTH", fd);
+        }
         LOG_INFO("new tunnel connection fd=%d from %s", fd,
                  net::peer_to_string(fd).c_str());
     }
@@ -253,11 +257,40 @@ void TunnelServer::HandleFrame(int fd, const Frame& frame) {
     if (it == sessions_.end()) return;
     TunnelSession& sess = *it->second;
 
+    // 鉴权检查: 非 AUTH 消息且未鉴权 → 断开
+    if (!token_.empty() && auth_pending_.count(fd) && frame.type != MessageType::AUTH) {
+        LOG_WARN("fd=%d unauthenticated (recv %s), disconnecting", fd, msg_type_str(frame.type));
+        CloseSession(fd);
+        return;
+    }
+
     switch (frame.type) {
-        case MessageType::HEARTBEAT:
-            LOG_DEBUG("fd=%d recv HEARTBEAT", fd);
+        case MessageType::AUTH:
+            // client 鉴权: { uint8 token_len; char token[...]; }
+            if (frame.payload.size() < 1) break;
             {
-                std::string hb = FrameBuilder(MessageType::HEARTBEAT).Build();
+                uint8_t tlen = static_cast<uint8_t>(frame.payload[0]);
+                std::string received_token = frame.payload.substr(1, tlen);
+                if (!token_.empty() && received_token == token_) {
+                    auth_pending_.erase(fd);
+                    LOG_INFO("fd=%d AUTH ok", fd);
+                    std::string ack = FrameBuilder(MessageType::ACK)
+                                          .AppendU8(0).Build();
+                    sess.writer.Append(std::move(ack));
+                    sess.writer.Flush(fd);
+                } else {
+                    LOG_WARN("fd=%d AUTH failed, disconnecting", fd);
+                    sess.writer.Append(FrameBuilder(MessageType::ACK).AppendU8(1).Build());
+                    sess.writer.Flush(fd);
+                    CloseSession(fd);
+                    return;
+                }
+            }
+            break;
+
+        case MessageType::HEARTBEAT: {
+            LOG_DEBUG("fd=%d recv HEARTBEAT", fd);
+            std::string hb = FrameBuilder(MessageType::HEARTBEAT).Build();
                 sess.writer.Append(std::move(hb));
                 if (!sess.writer.Flush(fd)) {
                     epoll_event ev{};
