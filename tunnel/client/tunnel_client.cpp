@@ -384,7 +384,9 @@ void TunnelClient::HandleFrame(const Frame& frame) {
 
         case MessageType::TUN_PACKET:
             if (tun_fd_ >= 0) {
-                write(tun_fd_, frame.payload.data(), frame.payload.size());
+                if (write(tun_fd_, frame.payload.data(), frame.payload.size()) < 0) {
+                    // TUN write failed, ignore on first frame
+                }
             }
             break;
 
@@ -702,7 +704,9 @@ void TunnelClient::HandleRelayData(uint32_t sid, const char* data, uint16_t dlen
     if (w < 0) {
         LOG_ERROR("write relay data to stdout failed: %s", strerror(errno));
     }
-    write(1, "\n", 1);
+    if (write(1, "\n", 1) < 0) {
+        // stdout write failed, ignore
+    }
     LOG_DEBUG("relay data (%u bytes) from session %u written to stdout", dlen, sid);
 }
 

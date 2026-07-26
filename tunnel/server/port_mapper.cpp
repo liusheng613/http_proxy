@@ -42,7 +42,7 @@ bool PortMapper::HandlePortMap(const std::string& payload) {
     // 每个 entry: uint16 local_port + uint16 remote_port = 4 字节
     if (payload.size() < 1 + static_cast<size_t>(count) * 4) {
         LOG_ERROR("PORT_MAP payload truncated (count=%u, need=%zu, have=%zu)",
-                  count, 1 + count * 4, payload.size());
+                  count, static_cast<size_t>(1 + count * 4), payload.size());
         return false;
     }
     for (uint8_t i = 0; i < count; ++i) {

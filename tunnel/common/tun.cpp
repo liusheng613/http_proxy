@@ -50,7 +50,7 @@ bool set_ip(const std::string& dev_name, const std::string& ip, int prefix) {
         return false;
     }
     snprintf(cmd, sizeof(cmd), "ip link set %s up 2>/dev/null", dev_name.c_str());
-    system(cmd);
+    if (system(cmd) != 0) {}  // ignore failure
     LOG_INFO("TUN %s: IP %s/%d configured", dev_name.c_str(), ip.c_str(), prefix);
     return true;
 }
@@ -59,7 +59,7 @@ bool add_route(const std::string& subnet, const std::string& dev_name) {
     char cmd[256];
     snprintf(cmd, sizeof(cmd), "ip route add %s dev %s 2>/dev/null",
              subnet.c_str(), dev_name.c_str());
-    system(cmd);
+    if (system(cmd) != 0) {}  // ignore failure
     return true;
 }
 
