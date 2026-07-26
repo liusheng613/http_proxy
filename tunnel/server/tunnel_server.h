@@ -94,6 +94,10 @@ private:
     struct RelaySession {
         int tunnel_a;  // 发起方
         int tunnel_b;  // 目标方
+        // P2P 协商状态
+        uint16_t port_a = 0;  // client A 的 P2P 端口 (0=未上报)
+        uint16_t port_b = 0;  // client B 的 P2P 端口
+        bool p2p_active = false; // P2P 已建立, 不再中继 DATA
     };
     std::unordered_map<uint32_t, RelaySession> relay_sessions_;
 };

@@ -78,6 +78,13 @@ private:
     // 发送探活请求到目标 client (可选功能, 用于测试)
     void SendProbe(const std::string& target_name, uint32_t probe_id);
 
+    // P2P 打洞: 收到 P2P_TRY, 创建 P2P socket
+    void HandleP2pTry(uint32_t session_id);
+    // P2P 打洞: 收到 P2P_INFO, 开始 connect
+    void HandleP2pInfo(uint32_t session_id, uint32_t peer_ip, uint16_t peer_port);
+    // P2P 数据: 从 P2P socket 读取数据
+    void HandleP2pReadable(int p2p_fd);
+
     // 处理 stdin 输入 (交互命令)
     void HandleStdinReadable();
     // 发起 client 间中继连接
@@ -126,6 +133,17 @@ private:
     std::string pending_relay_buf_;
     // 本地用户连接对应的中继目标名 (pending 时暂存)
     std::string pending_relay_target_;
+
+    // P2P 打洞状态: session_id -> {p2p_fd, timeout}
+    struct P2pState {
+        int p2p_fd = -1;
+        time_t start_time = 0;
+        std::string write_buf;  // P2P 写缓冲
+        bool connected = false; // TCP 握手已完成
+    };
+    std::unordered_map<uint32_t, P2pState> p2p_states_;
+    // P2P fd -> session_id 反向映射
+    std::unordered_map<int, uint32_t> p2p_to_session_;
 };
 
 }  // namespace client

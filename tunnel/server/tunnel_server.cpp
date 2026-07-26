@@ -357,6 +357,15 @@ void TunnelServer::HandleFrame(int fd, const Frame& frame) {
 
                     LOG_INFO("relay session %u: fd=%d -> '%s'(fd=%d) port=%u",
                              sid, fd, target_name.c_str(), target_fd, target_port);
+
+                    // 通知双方尝试 P2P 打洞
+                    std::string p2p = FrameBuilder(MessageType::P2P_TRY)
+                                          .AppendU32(sid)
+                                          .Build();
+                    sess.writer.Append(p2p);
+                    sess.writer.Flush(fd);
+                    sessions_[target_fd]->writer.Append(p2p);
+                    sessions_[target_fd]->writer.Flush(target_fd);
                 }
             }
             break;
@@ -391,6 +400,7 @@ void TunnelServer::HandleFrame(int fd, const Frame& frame) {
                 // 2) 再查 relay_sessions_ (client 间中继)
                 auto rit = relay_sessions_.find(sid);
                 if (rit != relay_sessions_.end()) {
+                    if (rit->second.p2p_active) break;  // P2P 已建立，跳过
                     int other_fd = (rit->second.tunnel_a == fd) ?
                                    rit->second.tunnel_b : rit->second.tunnel_a;
                     auto other_it = sessions_.find(other_fd);
@@ -507,6 +517,76 @@ void TunnelServer::HandleFrame(int fd, const Frame& frame) {
                         kv.second->writer.Flush(kv.first);
                     }
                 }
+            }
+            break;
+
+        case MessageType::P2P_PORT:
+            // client 上报自己的 P2P 端口: { uint32 session_id; uint16 p2p_port; }
+            if (frame.payload.size() < 6) break;
+            {
+                uint32_t sid = ntohl(*reinterpret_cast<const uint32_t*>(&frame.payload[0]));
+                uint16_t port = ntohs(*reinterpret_cast<const uint16_t*>(&frame.payload[4]));
+                auto rit = relay_sessions_.find(sid);
+                if (rit == relay_sessions_.end()) break;
+                // 记录端口
+                if (fd == rit->second.tunnel_a) rit->second.port_a = port;
+                else rit->second.port_b = port;
+                LOG_INFO("P2P_PORT sid=%u fd=%d port=%u", sid, fd, port);
+                // 两端都已上报，交换信息
+                if (rit->second.port_a > 0 && rit->second.port_b > 0) {
+                    auto get_ip = [this](int tfd) -> uint32_t {
+                        sockaddr_in addr; socklen_t len = sizeof(addr);
+                        if (getpeername(tfd, (sockaddr*)&addr, &len) < 0) return 0;
+                        return addr.sin_addr.s_addr;
+                    };
+                    uint32_t ip_a = get_ip(rit->second.tunnel_a);
+                    uint32_t ip_b = get_ip(rit->second.tunnel_b);
+                    // 告知 A: B 的 endpoint
+                    auto ait = sessions_.find(rit->second.tunnel_a);
+                    if (ait != sessions_.end() && ip_b) {
+                        std::string info = FrameBuilder(MessageType::P2P_INFO)
+                                               .AppendU32(sid)
+                                               .AppendU32(ip_b)
+                                               .AppendU16(rit->second.port_b)
+                                               .Build();
+                        ait->second->writer.Append(info);
+                        ait->second->writer.Flush(rit->second.tunnel_a);
+                    }
+                    // 告知 B: A 的 endpoint
+                    auto bit = sessions_.find(rit->second.tunnel_b);
+                    if (bit != sessions_.end() && ip_a) {
+                        std::string info = FrameBuilder(MessageType::P2P_INFO)
+                                               .AppendU32(sid)
+                                               .AppendU32(ip_a)
+                                               .AppendU16(rit->second.port_a)
+                                               .Build();
+                        bit->second->writer.Append(info);
+                        bit->second->writer.Flush(rit->second.tunnel_b);
+                    }
+                    LOG_INFO("P2P_INFO exchanged sid=%u A=%u B=%u", sid, rit->second.port_a, rit->second.port_b);
+                }
+            }
+            break;
+
+        case MessageType::P2P_OK:
+            // client 报告 P2P 成功: { uint32 session_id; }
+            if (frame.payload.size() < 4) break;
+            {
+                uint32_t sid = ntohl(*reinterpret_cast<const uint32_t*>(&frame.payload[0]));
+                auto rit = relay_sessions_.find(sid);
+                if (rit != relay_sessions_.end()) {
+                    rit->second.p2p_active = true;
+                    LOG_INFO("P2P_OK sid=%u (fd=%d), P2P active, relay bypassed", sid, fd);
+                }
+            }
+            break;
+
+        case MessageType::P2P_FAIL:
+            // client 报告 P2P 失败: { uint32 session_id; }
+            if (frame.payload.size() < 4) break;
+            {
+                uint32_t sid = ntohl(*reinterpret_cast<const uint32_t*>(&frame.payload[0]));
+                LOG_INFO("P2P_FAIL sid=%u (fd=%d), continue relay", sid, fd);
             }
             break;
 

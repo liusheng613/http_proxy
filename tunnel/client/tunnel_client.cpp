@@ -95,6 +95,14 @@ void TunnelClient::Disconnect() {
         pending_relay_target_.clear();
     }
 
+    // 清理 P2P sockets
+    for (auto& kv : p2p_states_) {
+        epoll_ctl(epfd_, EPOLL_CTL_DEL, kv.second.p2p_fd, nullptr);
+        close(kv.second.p2p_fd);
+    }
+    p2p_states_.clear();
+    p2p_to_session_.clear();
+
     if (tunnel_fd_ >= 0) {
         epoll_ctl(epfd_, EPOLL_CTL_DEL, tunnel_fd_, nullptr);
         net::close_fd(tunnel_fd_);
@@ -336,6 +344,23 @@ void TunnelClient::HandleFrame(const Frame& frame) {
             }
             break;
 
+        case MessageType::P2P_TRY:
+            // server 通知尝试 P2P: { uint32 session_id; }
+            if (frame.payload.size() < 4) break;
+            HandleP2pTry(ntohl(*reinterpret_cast<const uint32_t*>(&frame.payload[0])));
+            break;
+
+        case MessageType::P2P_INFO:
+            // server 交换对端信息: { uint32 session_id; uint32 peer_ip; uint16 peer_port; }
+            if (frame.payload.size() < 10) break;
+            {
+                uint32_t sid = ntohl(*reinterpret_cast<const uint32_t*>(&frame.payload[0]));
+                uint32_t ip  = ntohl(*reinterpret_cast<const uint32_t*>(&frame.payload[4]));
+                uint16_t port = ntohs(*reinterpret_cast<const uint16_t*>(&frame.payload[8]));
+                HandleP2pInfo(sid, ip, port);
+            }
+            break;
+
         default:
             LOG_INFO("recv %s (payload_len=%zu), not handled",
                      msg_type_str(frame.type), frame.payload.size());
@@ -422,6 +447,20 @@ void TunnelClient::HandleLocalReadable(int local_fd) {
                 return;
             }
             uint32_t sid = it->second;
+            // P2P 活跃? 直接写到 P2P socket, 不走 tunnel
+            auto pit = p2p_states_.find(sid);
+            if (pit != p2p_states_.end() && pit->second.connected) {
+                pit->second.write_buf.append(buf, static_cast<size_t>(n));
+                // 尝试刷新
+                ssize_t w = write(pit->second.p2p_fd, pit->second.write_buf.data(),
+                                  pit->second.write_buf.size());
+                if (w > 0) pit->second.write_buf.erase(0, w);
+                if (w < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+                    LOG_ERROR("P2P write local_fd=%d -> p2p_fd=%d failed: %s",
+                              local_fd, pit->second.p2p_fd, strerror(errno));
+                }
+                continue;  // 无论写成功与否, 都已消费了本地数据
+            }
             std::string frame = FrameBuilder(MessageType::DATA)
                                     .AppendU32(sid)
                                     .AppendU16(static_cast<uint16_t>(n))
@@ -625,6 +664,144 @@ void TunnelClient::HandleRelayData(uint32_t sid, const char* data, uint16_t dlen
     LOG_DEBUG("relay data (%u bytes) from session %u written to stdout", dlen, sid);
 }
 
+void TunnelClient::HandleP2pTry(uint32_t session_id) {
+    LOG_INFO("P2P_TRY sid=%u, creating P2P socket", session_id);
+    int p2p_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (p2p_fd < 0) {
+        LOG_ERROR("P2P socket() failed: %s", strerror(errno));
+        return;
+    }
+    net::set_nonblock(p2p_fd);
+    net::set_reuse_addr(p2p_fd);
+    // bind 到随机端口
+    sockaddr_in local{};
+    local.sin_family = AF_INET;
+    local.sin_addr.s_addr = INADDR_ANY;
+    local.sin_port = 0;  // 让内核选端口
+    if (bind(p2p_fd, (sockaddr*)&local, sizeof(local)) < 0) {
+        LOG_ERROR("P2P bind failed: %s", strerror(errno));
+        close(p2p_fd);
+        return;
+    }
+    // 获取分配的端口
+    sockaddr_in addr{};
+    socklen_t len = sizeof(addr);
+    getsockname(p2p_fd, (sockaddr*)&addr, &len);
+    uint16_t local_port = ntohs(addr.sin_port);
+
+    // 上报端口给 server
+    std::string report = FrameBuilder(MessageType::P2P_PORT)
+                             .AppendU32(session_id)
+                             .AppendU16(local_port)
+                             .Build();
+    writer_.Append(std::move(report));
+    writer_.Flush(tunnel_fd_);
+    LOG_INFO("P2P_PORT sid=%u local_port=%u", session_id, local_port);
+
+    // 记录 P2P 状态
+    P2pState st;
+    st.p2p_fd = p2p_fd;
+    st.start_time = time(nullptr);
+    p2p_states_[session_id] = st;
+    p2p_to_session_[p2p_fd] = session_id;
+    // 先不加入 epoll, 等 HandleP2pInfo 中 connect() 后再加
+}
+
+void TunnelClient::HandleP2pInfo(uint32_t session_id, uint32_t peer_ip, uint16_t peer_port) {
+    auto it = p2p_states_.find(session_id);
+    if (it == p2p_states_.end()) {
+        LOG_WARN("P2P_INFO for unknown session %u", session_id);
+        return;
+    }
+    P2pState& st = it->second;
+    struct in_addr ip_addr;
+    ip_addr.s_addr = peer_ip;
+    LOG_INFO("P2P_INFO sid=%u peer=%s:%u, connecting",
+             session_id, inet_ntoa(ip_addr), peer_port);
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = peer_ip;
+    addr.sin_port = htons(peer_port);
+    int ret = connect(st.p2p_fd, (sockaddr*)&addr, sizeof(addr));
+    if (ret < 0 && errno != EINPROGRESS) {
+        // TCP simultaneous open 有时序问题, 快速重试几次
+        bool ok = false;
+        for (int try_n = 0; try_n < 5; ++try_n) {
+            usleep(20000);  // 20ms
+            ret = connect(st.p2p_fd, (sockaddr*)&addr, sizeof(addr));
+            if (ret == 0 || (ret < 0 && errno == EINPROGRESS)) { ok = true; break; }
+            if (ret < 0 && errno == EALREADY) { ok = true; break; }
+            // 关闭旧 fd 重建
+            close(st.p2p_fd);
+            st.p2p_fd = socket(AF_INET, SOCK_STREAM, 0);
+            net::set_nonblock(st.p2p_fd);
+            net::set_reuse_addr(st.p2p_fd);
+            p2p_to_session_.erase(session_id);
+            p2p_to_session_[st.p2p_fd] = session_id;
+        }
+        if (!ok) {
+            LOG_ERROR("P2P connect failed after retries: %s", strerror(errno));
+            std::string fail = FrameBuilder(MessageType::P2P_FAIL)
+                                   .AppendU32(session_id).Build();
+            writer_.Append(std::move(fail));
+            writer_.Flush(tunnel_fd_);
+            epoll_ctl(epfd_, EPOLL_CTL_DEL, st.p2p_fd, nullptr);
+            p2p_to_session_.erase(st.p2p_fd);
+            close(st.p2p_fd);
+            p2p_states_.erase(it);
+            return;
+        }
+    }
+    // connect() 已发起, 加入 epoll 监听可写(连接完成) + 可读
+    epoll_event ev{};
+    ev.events = EPOLLIN | EPOLLOUT | EPOLLET;
+    ev.data.fd = st.p2p_fd;
+    epoll_ctl(epfd_, EPOLL_CTL_ADD, st.p2p_fd, &ev);
+    // EINPROGRESS → 等待 EPOLLOUT
+}
+
+void TunnelClient::HandleP2pReadable(int p2p_fd) {
+    auto it = p2p_to_session_.find(p2p_fd);
+    if (it == p2p_to_session_.end()) return;
+    uint32_t sid = it->second;
+    // 查找对应的 local_fd (sessions_[sid])
+    auto sit = sessions_.find(sid);
+    if (sit == sessions_.end()) {
+        // relay 模式下 sessions_ 存的是 user_fd (发起方) 或 local_fd (目标方)
+        LOG_WARN("P2P readable for session %u but no local_fd/relay_fd", sid);
+        return;
+    }
+    char buf[65536];
+    for (;;) {
+        ssize_t n = read(p2p_fd, buf, sizeof(buf));
+        if (n > 0) {
+            ssize_t w = write(sit->second, buf, static_cast<size_t>(n));
+            if (w < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+                LOG_ERROR("P2P write to target fd=%d failed: %s", sit->second, strerror(errno));
+            }
+            continue;
+        }
+        if (n == 0) {
+            LOG_INFO("P2P fd=%d closed (session %u)", p2p_fd, sid);
+            epoll_ctl(epfd_, EPOLL_CTL_DEL, p2p_fd, nullptr);
+            close(p2p_fd);
+            p2p_to_session_.erase(p2p_fd);
+            p2p_states_.erase(sid);
+            // 通知 server 回退中继
+            std::string fail = FrameBuilder(MessageType::P2P_FAIL)
+                                   .AppendU32(sid).Build();
+            writer_.Append(std::move(fail));
+            writer_.Flush(tunnel_fd_);
+            return;
+        }
+        if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+        if (errno == EINTR) continue;
+        LOG_ERROR("P2P read fd=%d failed: %s", p2p_fd, strerror(errno));
+        break;
+    }
+}
+
 void TunnelClient::SetupLocalRelayListeners() {
     if (relay_listens_.empty()) return;
     // 需要在 Connect() 之后调用, 此时 epfd_ 已就绪
@@ -691,8 +868,21 @@ void TunnelClient::HandleLocalRelayUserReadable(int user_fd) {
                 pending_relay_buf_.append(buf, static_cast<size_t>(n));
                 continue;
             }
-            // 转发到中继 session
+            // 转发到中继 session (或 P2P 直连)
             uint32_t sid = it->second;
+            // P2P 活跃? 直接写到 P2P socket, 不走 tunnel
+            auto pit = p2p_states_.find(sid);
+            if (pit != p2p_states_.end() && pit->second.connected) {
+                pit->second.write_buf.append(buf, static_cast<size_t>(n));
+                ssize_t w = write(pit->second.p2p_fd, pit->second.write_buf.data(),
+                                  pit->second.write_buf.size());
+                if (w > 0) pit->second.write_buf.erase(0, w);
+                if (w < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+                    LOG_ERROR("P2P write user_fd=%d -> p2p_fd=%d failed: %s",
+                              user_fd, pit->second.p2p_fd, strerror(errno));
+                }
+                continue;
+            }
             std::string frame = FrameBuilder(MessageType::DATA)
                                     .AppendU32(sid)
                                     .AppendU16(static_cast<uint16_t>(n))
@@ -807,9 +997,54 @@ void TunnelClient::Run() {
                         HandleStdinReadable();
                     }
                 } else if (relay_listen_fds_.count(fd)) {
-                    // 本地中继监听端口有新的用户连接
                     if (events[i].events & EPOLLIN) {
                         HandleLocalRelayAccept(fd);
+                    }
+                } else if (fd == pending_relay_user_fd_) {
+                    // 等待 relay ack 的 user_fd, 保持 pending 处理
+                    if (events[i].events & EPOLLIN) {
+                        HandleLocalRelayUserReadable(fd);
+                    }
+                } else if (p2p_to_session_.count(fd)) {
+                    // P2P socket 事件
+                    if (events[i].events & EPOLLOUT) {
+                        auto pit = p2p_to_session_.find(fd);
+                        if (pit != p2p_to_session_.end()) {
+                            auto sit = p2p_states_.find(pit->second);
+                            if (sit == p2p_states_.end()) continue;
+                            if (!sit->second.connected) {
+                                // 检查 TCP 握手是否完成
+                                int err = 0; socklen_t len = sizeof(err);
+                                getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len);
+                                if (err == 0) {
+                                    sit->second.connected = true;
+                                    LOG_INFO("P2P connect ok fd=%d session=%u", fd, pit->second);
+                                    std::string ok = FrameBuilder(MessageType::P2P_OK)
+                                                         .AppendU32(pit->second).Build();
+                                    writer_.Append(std::move(ok));
+                                    writer_.Flush(tunnel_fd_);
+                                } else {
+                                    LOG_ERROR("P2P connect failed: %s", strerror(err));
+                                    std::string fail = FrameBuilder(MessageType::P2P_FAIL)
+                                                           .AppendU32(pit->second).Build();
+                                    writer_.Append(std::move(fail));
+                                    writer_.Flush(tunnel_fd_);
+                                    epoll_ctl(epfd_, EPOLL_CTL_DEL, fd, nullptr);
+                                    close(fd);
+                                    p2p_states_.erase(sit);
+                                    p2p_to_session_.erase(pit);
+                                }
+                            }
+                            // 刷新写缓冲区
+                            if (!sit->second.write_buf.empty()) {
+                                ssize_t w = write(fd, sit->second.write_buf.data(),
+                                                  sit->second.write_buf.size());
+                                if (w > 0) sit->second.write_buf.erase(0, w);
+                            }
+                        }
+                    }
+                    if (events[i].events & EPOLLIN) {
+                        HandleP2pReadable(fd);
                     }
                 } else if (local_to_session_.count(fd)) {
                     // 本地中继用户连接上有数据
@@ -838,6 +1073,26 @@ void TunnelClient::Run() {
                 SendHeartbeat();
             }
             CheckHeartbeatTimeout();
+            // P2P 超时检测: 3 秒未完成握手则回退中继
+            std::vector<uint32_t> p2p_dead;
+            for (auto& kv : p2p_states_) {
+                if (!kv.second.connected && now - kv.second.start_time > 3) {
+                    p2p_dead.push_back(kv.first);
+                }
+            }
+            for (uint32_t sid : p2p_dead) {
+                auto it = p2p_states_.find(sid);
+                if (it == p2p_states_.end()) continue;
+                LOG_WARN("P2P timeout sid=%u, fallback to relay", sid);
+                std::string fail = FrameBuilder(MessageType::P2P_FAIL)
+                                       .AppendU32(sid).Build();
+                writer_.Append(std::move(fail));
+                writer_.Flush(tunnel_fd_);
+                epoll_ctl(epfd_, EPOLL_CTL_DEL, it->second.p2p_fd, nullptr);
+                p2p_to_session_.erase(it->second.p2p_fd);
+                close(it->second.p2p_fd);
+                p2p_states_.erase(it);
+            }
         }
     }
 

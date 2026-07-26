@@ -72,6 +72,21 @@ enum class MessageType : uint8_t {
     //   方向: client B -> server -> client A
     //   payload: { uint32 probe_id; uint8 status; }  // status: 0=ok, 1=not_found
     PROBE_REPLY = 0x09,
+
+    // P2P 打洞协商: server 通知双方尝试 P2P。payload: { uint32 session_id; }
+    P2P_TRY = 0x0A,
+
+    // P2P 端口上报: client 告知 server 自己的 P2P 端口。payload: { uint32 session_id; uint16 p2p_port; }
+    P2P_PORT = 0x0B,
+
+    // P2P 端口信息: server 通知 client 对端的 IP+端口。payload: { uint32 session_id; uint32 peer_ip; uint16 peer_port; }
+    P2P_INFO = 0x0C,
+
+    // P2P 成功: client 通知 server 直连已建立。payload: { uint32 session_id; }
+    P2P_OK = 0x0D,
+
+    // P2P 失败: client 通知 server 打洞失败, 回退中继。payload: { uint32 session_id; }
+    P2P_FAIL = 0x0E,
 };
 
 inline const char* msg_type_str(MessageType t) {
@@ -85,6 +100,11 @@ inline const char* msg_type_str(MessageType t) {
         case MessageType::ACK:       return "ACK";
         case MessageType::PROBE:     return "PROBE";
         case MessageType::PROBE_REPLY: return "PROBE_REPLY";
+        case MessageType::P2P_TRY:  return "P2P_TRY";
+        case MessageType::P2P_PORT: return "P2P_PORT";
+        case MessageType::P2P_INFO: return "P2P_INFO";
+        case MessageType::P2P_OK:   return "P2P_OK";
+        case MessageType::P2P_FAIL: return "P2P_FAIL";
     }
     return "UNKNOWN";
 }
