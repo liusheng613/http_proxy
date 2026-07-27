@@ -1,5 +1,8 @@
 #include "write_buffer.h"
 
+#ifndef _WIN32
+  #include <sys/uio.h>
+#endif
 #include <unistd.h>
 
 #include <cerrno>
@@ -9,7 +12,8 @@ namespace tunnel {
 
 bool WriteBuffer::Flush(int fd) {
     while (!queue_.empty()) {
-        // 构造 iovec 数组 (批量发送, 减少系统调用)
+#ifndef _WIN32
+        // Linux: writev 批量发送
         std::vector<iovec> iovs;
         iovs.reserve(queue_.size());
         for (const auto& s : queue_) {
@@ -20,26 +24,20 @@ bool WriteBuffer::Flush(int fd) {
                 iovs.push_back(iv);
             }
         }
-
-        if (iovs.empty()) {
-            // 都是空字符串, 直接丢弃
-            queue_.clear();
-            return true;
-        }
-
+        if (iovs.empty()) { queue_.clear(); return true; }
         ssize_t n = writev(fd, iovs.data(), static_cast<int>(iovs.size()));
+#else
+        // Windows: 拼接后单次 write
+        std::string combined;
+        for (const auto& s : queue_) combined += s;
+        if (combined.empty()) { queue_.clear(); return true; }
+        ssize_t n = write(fd, combined.data(), combined.size());
+#endif
         if (n < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                return false;  // 发送缓冲区满, 等下次 EPOLLOUT
-            }
-            if (errno == EINTR) {
-                continue;
-            }
-            // 真正出错 (如对端 reset): 这里直接清空, 由上层判断连接状态
+            if (errno == EAGAIN || errno == EWOULDBLOCK) return false;
+            if (errno == EINTR) continue;
             return false;
         }
-
-        // 丢弃已发送的字节
         size_t remaining = static_cast<size_t>(n);
         while (remaining > 0 && !queue_.empty()) {
             if (queue_.front().size() <= remaining) {

@@ -1,11 +1,17 @@
 #include "netutil.h"
 #include "logger.h"
 
-#include <arpa/inet.h>
+#ifdef _WIN32
+  #include <winsock2.h>
+  #include <ws2tcpip.h>
+  #include <windows.h>
+#else
+  #include <arpa/inet.h>
+  #include <netinet/in.h>
+  #include <netinet/tcp.h>
+  #include <sys/socket.h>
+#endif
 #include <fcntl.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
-#include <sys/socket.h>
 #include <unistd.h>
 
 #include <cerrno>
@@ -15,29 +21,37 @@ namespace tunnel {
 namespace net {
 
 int set_nonblock(int fd) {
+#ifdef _WIN32
+    u_long mode = 1;
+    return ioctlsocket(fd, FIONBIO, &mode);
+#else
     int flags = fcntl(fd, F_GETFL, 0);
-    if (flags == -1) {
-        return -1;
-    }
+    if (flags == -1) return -1;
     return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+#endif
 }
 
 int set_block(int fd) {
+#ifdef _WIN32
+    u_long mode = 0;
+    return ioctlsocket(fd, FIONBIO, &mode);
+#else
     int flags = fcntl(fd, F_GETFL, 0);
-    if (flags == -1) {
-        return -1;
-    }
+    if (flags == -1) return -1;
     return fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+#endif
 }
 
 int set_reuse_addr(int fd) {
     int yes = 1;
-    return setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+    return setsockopt(fd, SOL_SOCKET, SO_REUSEADDR,
+                      reinterpret_cast<const char*>(&yes), sizeof(yes));
 }
 
 int set_nodelay(int fd) {
     int yes = 1;
-    return setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes));
+    return setsockopt(fd, IPPROTO_TCP, TCP_NODELAY,
+                      reinterpret_cast<const char*>(&yes), sizeof(yes));
 }
 
 int create_listen_socket(uint16_t port, int tcp_backlog) {
@@ -92,19 +106,30 @@ int create_connect_socket(const std::string& ip, uint16_t port, bool* connected)
         if (connected) *connected = true;
         return fd;
     }
+#ifdef _WIN32
+    if (WSAGetLastError() == WSAEWOULDBLOCK) {
+        if (connected) *connected = false;
+        return fd;
+    }
+    LOG_ERROR("connect(%s:%u) failed: WSA error %d", ip.c_str(), port, WSAGetLastError());
+#else
     if (errno == EINPROGRESS) {
-        // 非阻塞连接进行中, 由 epoll 通知可写后再判断是否真正连上
         if (connected) *connected = false;
         return fd;
     }
     LOG_ERROR("connect(%s:%u) failed: %s", ip.c_str(), port, strerror(errno));
-    close(fd);
+#endif
+    close_fd(fd);
     return -1;
 }
 
 void close_fd(int& fd) {
     if (fd >= 0) {
+#ifdef _WIN32
+        closesocket(fd);
+#else
         close(fd);
+#endif
         fd = -1;
     }
 }

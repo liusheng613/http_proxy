@@ -4,7 +4,9 @@
 #include <string>
 #include <vector>
 
+#ifndef _WIN32
 #include <sys/uio.h>  // writev
+#endif
 
 namespace tunnel {
 

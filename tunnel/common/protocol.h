@@ -4,7 +4,11 @@
 #include <cstdint>
 #include <cstring>
 #include <string>
-#include <arpa/inet.h>  // htons/htonl/ntohs/ntohl
+#ifdef _WIN32
+  #include <winsock2.h>
+#else
+  #include <arpa/inet.h>  // htons/htonl/ntohs/ntohl
+#endif
 
 // =============================================================================
 // 隧道应用层帧协议 (所有 client <-> server 通信都走这个帧格式)

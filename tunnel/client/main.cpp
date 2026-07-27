@@ -9,6 +9,7 @@
 #include "../common/config.h"
 #include "../common/crypto.h"
 #include "../common/frame.h"
+#include "../common/platform.h"
 #include "tunnel_client.h"
 
 // 用法: tunnel_client <server_ip> [server_port] [-n name] [-L local:remote] [-R local:target:port] [-C target:port] [-d]
@@ -20,7 +21,11 @@
 //   -C target:port: 启动后自动发起中继连接到目标 client 的端口
 //   -d: 开启 DEBUG 日志 (默认 INFO)
 int main(int argc, char** argv) {
+#ifndef _WIN32
     ::signal(SIGPIPE, SIG_IGN);
+#else
+    winsock_init();
+#endif
 
     if (argc < 2) {
         fprintf(stderr,
@@ -198,5 +203,8 @@ int main(int argc, char** argv) {
     client.Run();
 
     LOG_INFO("tunnel client exit");
+#ifdef _WIN32
+    winsock_cleanup();
+#endif
     return 0;
 }

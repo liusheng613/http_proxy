@@ -1,9 +1,11 @@
 #ifndef TUNNEL_COMMON_TUN_H_
 #define TUNNEL_COMMON_TUN_H_
 
+#ifndef _WIN32
 #include <linux/if_tun.h>
 #include <net/if.h>
 #include <sys/ioctl.h>
+#endif
 #include <string>
 
 namespace tunnel {

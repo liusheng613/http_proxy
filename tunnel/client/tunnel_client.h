@@ -7,6 +7,7 @@
 #include <utility>
 #include <vector>
 
+#include "../common/event_poller.h"
 #include "../common/frame.h"
 #include "../common/protocol.h"
 #include "../common/write_buffer.h"
@@ -120,7 +121,7 @@ private:
     int tun_fd_ = -1;     // TUN 设备 fd
 
     int tunnel_fd_;
-    int epfd_;
+    EventPoller poller_;
     bool connected_;
 
     FrameDecoder decoder_;

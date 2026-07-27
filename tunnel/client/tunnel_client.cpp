@@ -1,7 +1,9 @@
 #include "tunnel_client.h"
 
-#include <sys/epoll.h>
 #include <unistd.h>
+#ifdef _WIN32
+#define socklen_t int  // MinGW compat
+#endif
 
 #include <cerrno>
 #include <ctime>
@@ -9,6 +11,7 @@
 #include "../common/logger.h"
 #include "../common/netutil.h"
 #include "../common/tun.h"
+#include "../common/platform.h"
 
 namespace tunnel {
 namespace client {
@@ -31,7 +34,7 @@ TunnelClient::TunnelClient(const std::string& server_ip, uint16_t server_port,
     : server_ip_(server_ip), server_port_(server_port),
       mappings_(mappings), name_(name), auto_connect_target_(auto_connect),
       relay_listens_(relay_listens), token_(token), tun_enabled_(tun_enabled),
-      tunnel_fd_(-1), epfd_(-1), connected_(false),
+      tunnel_fd_(-1), connected_(false),
       last_send_heartbeat_(0), last_recv_heartbeat_(0), active_relay_sid_(0) {}
 
 TunnelClient::~TunnelClient() { Disconnect(); }
@@ -44,20 +47,13 @@ bool TunnelClient::Connect() {
     }
     net::set_nonblock(tunnel_fd_);
 
-    if (epfd_ < 0) {
-        epfd_ = epoll_create1(EPOLL_CLOEXEC);
-        if (epfd_ < 0) {
-            LOG_ERROR("epoll_create1 failed: %s", strerror(errno));
-            net::close_fd(tunnel_fd_);
-            return false;
-        }
+    if (!poller_.create()) {
+        LOG_ERROR("event poller create failed");
+        net::close_fd(tunnel_fd_);
+        return false;
     }
-
-    epoll_event ev{};
-    ev.events = EPOLLIN | EPOLLOUT | EPOLLET;
-    ev.data.fd = tunnel_fd_;
-    if (epoll_ctl(epfd_, EPOLL_CTL_ADD, tunnel_fd_, &ev) < 0) {
-        LOG_ERROR("epoll_ctl add tunnel_fd failed: %s", strerror(errno));
+    if (!poller_.add(tunnel_fd_, EventPoller::READABLE | EventPoller::WRITABLE | EventPoller::ET_MODE)) {
+        LOG_ERROR("poller add tunnel_fd failed");
         net::close_fd(tunnel_fd_);
         return false;
     }
@@ -72,7 +68,7 @@ bool TunnelClient::Connect() {
 void TunnelClient::Disconnect() {
     // 关闭所有 local_fd (端口映射)
     for (auto& kv : sessions_) {
-        epoll_ctl(epfd_, EPOLL_CTL_DEL, kv.second, nullptr);
+        poller_.del(kv.second);
         close(kv.second);
     }
     sessions_.clear();
@@ -80,13 +76,13 @@ void TunnelClient::Disconnect() {
 
     // 清理 stdin 监听 (如果 relay session 活跃)
     if (active_relay_sid_ > 0) {
-        epoll_ctl(epfd_, EPOLL_CTL_DEL, 0, nullptr);
+        poller_.del(0);
         active_relay_sid_ = 0;
     }
 
     // 关闭中继监听 fd
     for (auto& kv : relay_listen_fds_) {
-        epoll_ctl(epfd_, EPOLL_CTL_DEL, kv.first, nullptr);
+        poller_.del(kv.first);
         close(kv.first);
     }
     relay_listen_fds_.clear();
@@ -97,7 +93,7 @@ void TunnelClient::Disconnect() {
             std::string cmd = "ip link del " + tun_dev_name_ + " 2>/dev/null";
             if (system(cmd.c_str()) != 0) {}  // ignore failure
         }
-        epoll_ctl(epfd_, EPOLL_CTL_DEL, tun_fd_, nullptr);
+        poller_.del(tun_fd_);
         close(tun_fd_);
         tun_fd_ = -1;
         tun_dev_name_.clear();
@@ -112,14 +108,14 @@ void TunnelClient::Disconnect() {
 
     // 清理 P2P sockets
     for (auto& kv : p2p_states_) {
-        epoll_ctl(epfd_, EPOLL_CTL_DEL, kv.second.p2p_fd, nullptr);
+        poller_.del(kv.second.p2p_fd);
         close(kv.second.p2p_fd);
     }
     p2p_states_.clear();
     p2p_to_session_.clear();
 
     if (tunnel_fd_ >= 0) {
-        epoll_ctl(epfd_, EPOLL_CTL_DEL, tunnel_fd_, nullptr);
+        poller_.del(tunnel_fd_);
         net::close_fd(tunnel_fd_);
     }
     connected_ = false;
@@ -131,7 +127,8 @@ void TunnelClient::HandleTunnelWritable() {
     if (!connected_) {
         int err = 0;
         socklen_t len = sizeof(err);
-        if (getsockopt(tunnel_fd_, SOL_SOCKET, SO_ERROR, &err, &len) < 0 || err != 0) {
+        if (getsockopt(tunnel_fd_, SOL_SOCKET, SO_ERROR,
+                       reinterpret_cast<char*>(&err), &len) < 0 || err != 0) {
             LOG_ERROR("connect failed: %s", strerror(err ? err : errno));
             Disconnect();
             return;
@@ -154,10 +151,7 @@ void TunnelClient::HandleTunnelWritable() {
     }
 
     if (writer_.Flush(tunnel_fd_)) {
-        epoll_event ev{};
-        ev.events = EPOLLIN | EPOLLET;
-        ev.data.fd = tunnel_fd_;
-        epoll_ctl(epfd_, EPOLL_CTL_MOD, tunnel_fd_, &ev);
+            poller_.mod(tunnel_fd_, EventPoller::READABLE | EventPoller::ET_MODE);;
     }
 }
 
@@ -237,10 +231,7 @@ void TunnelClient::HandleFrame(const Frame& frame) {
                         // 来自 stdin 命令: 进入 stdin 中继模式
                         LOG_INFO("relay session %u established, stdin ↔ relay active", sid);
                         active_relay_sid_ = sid;
-                        epoll_event ev{};
-                        ev.events = EPOLLIN;
-                        ev.data.fd = 0;
-                        epoll_ctl(epfd_, EPOLL_CTL_ADD, 0, &ev);
+                        poller_.add(0, EventPoller::READABLE);;
                         LOG_INFO("type/paste data and press Enter to send to relay session %u", sid);
                     }
                 } else {
@@ -292,7 +283,7 @@ void TunnelClient::HandleFrame(const Frame& frame) {
                 if (sid == active_relay_sid_) {
                     LOG_INFO("relay session %u closed by peer", sid);
                     // 从 epoll 移除 stdin
-                    epoll_ctl(epfd_, EPOLL_CTL_DEL, 0, nullptr);
+                    poller_.del(0);
                     active_relay_sid_ = 0;
                     break;
                 }
@@ -388,11 +379,12 @@ void TunnelClient::HandleFrame(const Frame& frame) {
             break;
 
         case MessageType::TUN_PACKET:
+#ifndef _WIN32
             if (tun_fd_ >= 0) {
                 if (write(tun_fd_, frame.payload.data(), frame.payload.size()) < 0) {
-                    // TUN write failed, ignore on first frame
                 }
             }
+#endif
             break;
 
         default:
@@ -466,15 +458,9 @@ void TunnelClient::HandleNewConn(uint32_t session_id, uint16_t local_port) {
 
     // 如果连接未立即完成, 需要等可写事件
     if (!immediately) {
-        epoll_event ev{};
-        ev.events = EPOLLIN | EPOLLOUT | EPOLLET;
-        ev.data.fd = local_fd;
-        epoll_ctl(epfd_, EPOLL_CTL_ADD, local_fd, &ev);
+            poller_.add(local_fd, EventPoller::READABLE | EventPoller::WRITABLE | EventPoller::ET_MODE);;
     } else {
-        epoll_event ev{};
-        ev.events = EPOLLIN | EPOLLET;
-        ev.data.fd = local_fd;
-        epoll_ctl(epfd_, EPOLL_CTL_ADD, local_fd, &ev);
+            poller_.add(local_fd, EventPoller::READABLE | EventPoller::ET_MODE);;
     }
 
     sessions_[session_id] = local_fd;
@@ -492,7 +478,7 @@ void TunnelClient::HandleLocalReadable(int local_fd) {
             if (it == local_to_session_.end()) {
                 LOG_WARN("local_fd=%d has no session", local_fd);
                 close(local_fd);
-                epoll_ctl(epfd_, EPOLL_CTL_DEL, local_fd, nullptr);
+                poller_.del(local_fd);
                 return;
             }
             uint32_t sid = it->second;
@@ -517,10 +503,7 @@ void TunnelClient::HandleLocalReadable(int local_fd) {
                                     .Build();
             writer_.Append(std::move(frame));
             if (!writer_.Flush(tunnel_fd_)) {
-                epoll_event ev{};
-                ev.events = EPOLLIN | EPOLLOUT | EPOLLET;
-                ev.data.fd = tunnel_fd_;
-                epoll_ctl(epfd_, EPOLL_CTL_MOD, tunnel_fd_, &ev);
+                    poller_.mod(tunnel_fd_, EventPoller::READABLE | EventPoller::WRITABLE | EventPoller::ET_MODE);;
             }
             continue;
         }
@@ -538,7 +521,7 @@ void TunnelClient::HandleLocalReadable(int local_fd) {
                 sessions_.erase(sid);
                 local_to_session_.erase(local_fd);
             }
-            epoll_ctl(epfd_, EPOLL_CTL_DEL, local_fd, nullptr);
+            poller_.del(local_fd);
             close(local_fd);
             LOG_DEBUG("local_fd=%d closed (local service disconnected)", local_fd);
             return;
@@ -557,7 +540,7 @@ void TunnelClient::HandleLocalReadable(int local_fd) {
             sessions_.erase(it->second);
             local_to_session_.erase(local_fd);
         }
-        epoll_ctl(epfd_, EPOLL_CTL_DEL, local_fd, nullptr);
+        poller_.del(local_fd);
         close(local_fd);
         return;
     }
@@ -569,7 +552,7 @@ void TunnelClient::CloseLocal(uint32_t session_id) {
     int local_fd = it->second;
     sessions_.erase(it);
     local_to_session_.erase(local_fd);
-    epoll_ctl(epfd_, EPOLL_CTL_DEL, local_fd, nullptr);
+    poller_.del(local_fd);
     close(local_fd);
     LOG_DEBUG("closed local_fd=%d for session %u", local_fd, session_id);
 }
@@ -579,10 +562,7 @@ void TunnelClient::SendHeartbeat() {
     std::string hb = FrameBuilder(MessageType::HEARTBEAT).Build();
     writer_.Append(std::move(hb));
     if (!writer_.Flush(tunnel_fd_)) {
-        epoll_event ev{};
-        ev.events = EPOLLIN | EPOLLOUT | EPOLLET;
-        ev.data.fd = tunnel_fd_;
-        epoll_ctl(epfd_, EPOLL_CTL_MOD, tunnel_fd_, &ev);
+            poller_.mod(tunnel_fd_, EventPoller::READABLE | EventPoller::WRITABLE | EventPoller::ET_MODE);;
     }
     last_send_heartbeat_ = time(nullptr);
     LOG_DEBUG("send HEARTBEAT");
@@ -659,7 +639,7 @@ void TunnelClient::HandleStdinReadable() {
                                     .Build();
             writer_.Append(std::move(frame));
             writer_.Flush(tunnel_fd_);
-            epoll_ctl(epfd_, EPOLL_CTL_DEL, 0, nullptr);
+            poller_.del(0);
             active_relay_sid_ = 0;
         }
         return;
@@ -797,7 +777,7 @@ void TunnelClient::HandleP2pInfo(uint32_t session_id, uint32_t peer_ip, uint16_t
                                    .AppendU32(session_id).Build();
             writer_.Append(std::move(fail));
             writer_.Flush(tunnel_fd_);
-            epoll_ctl(epfd_, EPOLL_CTL_DEL, st.p2p_fd, nullptr);
+            poller_.del(st.p2p_fd);
             p2p_to_session_.erase(st.p2p_fd);
             close(st.p2p_fd);
             p2p_states_.erase(it);
@@ -805,10 +785,7 @@ void TunnelClient::HandleP2pInfo(uint32_t session_id, uint32_t peer_ip, uint16_t
         }
     }
     // connect() 已发起, 加入 epoll 监听可写(连接完成) + 可读
-    epoll_event ev{};
-    ev.events = EPOLLIN | EPOLLOUT | EPOLLET;
-    ev.data.fd = st.p2p_fd;
-    epoll_ctl(epfd_, EPOLL_CTL_ADD, st.p2p_fd, &ev);
+        poller_.add(st.p2p_fd, EventPoller::READABLE | EventPoller::WRITABLE | EventPoller::ET_MODE);;
     // EINPROGRESS → 等待 EPOLLOUT
 }
 
@@ -835,7 +812,7 @@ void TunnelClient::HandleP2pReadable(int p2p_fd) {
         }
         if (n == 0) {
             LOG_INFO("P2P fd=%d closed (session %u)", p2p_fd, sid);
-            epoll_ctl(epfd_, EPOLL_CTL_DEL, p2p_fd, nullptr);
+            poller_.del(p2p_fd);
             close(p2p_fd);
             p2p_to_session_.erase(p2p_fd);
             p2p_states_.erase(sid);
@@ -855,7 +832,7 @@ void TunnelClient::HandleP2pReadable(int p2p_fd) {
 
 void TunnelClient::SetupLocalRelayListeners() {
     if (relay_listens_.empty()) return;
-    // 需要在 Connect() 之后调用, 此时 epfd_ 已就绪
+    // 需要在 Connect() 之后调用, 此时 poller_ 已就绪
     for (auto& cfg : relay_listens_) {
         int lfd = net::create_listen_socket(cfg.local_port);
         if (lfd < 0) {
@@ -863,10 +840,7 @@ void TunnelClient::SetupLocalRelayListeners() {
                       cfg.local_port, cfg.target_name.c_str(), cfg.target_port);
             continue;
         }
-        epoll_event ev{};
-        ev.events = EPOLLIN | EPOLLET;
-        ev.data.fd = lfd;
-        if (epoll_ctl(epfd_, EPOLL_CTL_ADD, lfd, &ev) < 0) {
+        if (!poller_.add(lfd, EventPoller::READABLE | EventPoller::ET_MODE)) {
             LOG_ERROR("epoll_ctl add relay listen fd=%d failed", lfd);
             close(lfd);
             continue;
@@ -878,6 +852,7 @@ void TunnelClient::SetupLocalRelayListeners() {
 }
 
 void TunnelClient::SetupTun() {
+#ifndef _WIN32
     if (!tun_enabled_ || tun_assigned_ip_.s_addr == 0) return;
     if (tun_fd_ >= 0) return;  // 已创建，重连后不重复创建
     tun_fd_ = tun::create("tun%d");
@@ -898,14 +873,13 @@ void TunnelClient::SetupTun() {
     tun::set_ip(tun_dev_name_, ip_str, 24);
     tun::add_route("10.0.0.0/24", tun_dev_name_);
 
-    epoll_event ev{};
-    ev.events = EPOLLIN | EPOLLET;
-    ev.data.fd = tun_fd_;
-    epoll_ctl(epfd_, EPOLL_CTL_ADD, tun_fd_, &ev);
+        poller_.add(tun_fd_, EventPoller::READABLE | EventPoller::ET_MODE);
     LOG_INFO("TUN ready: %s -> %s", tun_dev_name_.c_str(), ip_str.c_str());
+#endif
 }
 
 void TunnelClient::HandleTunReadable() {
+#ifndef _WIN32
     if (tun_fd_ < 0) return;
     char buf[65536];
     for (;;) {
@@ -923,6 +897,7 @@ void TunnelClient::HandleTunReadable() {
         LOG_ERROR("read TUN fd failed: %s", strerror(errno));
         break;
     }
+#endif
 }
 
 void TunnelClient::HandleLocalRelayAccept(int listen_fd) {
@@ -937,11 +912,8 @@ void TunnelClient::HandleLocalRelayAccept(int listen_fd) {
             break;
         }
         net::set_nonblock(user_fd);
-        epoll_event ev{};
-        ev.events = EPOLLIN | EPOLLET;  // ET mode, pending 数据由 pending_relay_buf_ 处理
-        ev.data.fd = user_fd;
-        if (epoll_ctl(epfd_, EPOLL_CTL_ADD, user_fd, &ev) < 0) {
-            LOG_ERROR("epoll_ctl add relay user_fd=%d failed", user_fd);
+        if (!poller_.add(user_fd, EventPoller::READABLE | EventPoller::ET_MODE)) {
+            LOG_ERROR("poller add relay user_fd=%d failed", user_fd);
             close(user_fd);
             continue;
         }
@@ -1007,7 +979,7 @@ void TunnelClient::HandleLocalRelayUserReadable(int user_fd) {
                 sessions_.erase(sid);
                 local_to_session_.erase(user_fd);
             }
-            epoll_ctl(epfd_, EPOLL_CTL_DEL, user_fd, nullptr);
+            poller_.del(user_fd);
             close(user_fd);
             return;
         }
@@ -1023,7 +995,7 @@ void TunnelClient::HandleLocalRelayUserReadable(int user_fd) {
             pending_relay_target_.clear();
             pending_relay_buf_.clear();
         }
-        epoll_ctl(epfd_, EPOLL_CTL_DEL, user_fd, nullptr);
+        poller_.del(user_fd);
         close(user_fd);
         return;
     }
@@ -1035,7 +1007,7 @@ void TunnelClient::Run() {
         if (tunnel_fd_ < 0) {
             if (need_backoff) {
                 LOG_INFO("retry connecting in %ds ...", kReconnectIntervalSec);
-                sleep(kReconnectIntervalSec);
+                platform_sleep_ms(kReconnectIntervalSec * 1000);
             }
             LOG_INFO("connecting to %s:%u ...", server_ip_.c_str(), server_port_);
             if (!Connect()) {
@@ -1046,8 +1018,8 @@ void TunnelClient::Run() {
             need_backoff = false;
         }
 
-        epoll_event events[kMaxEvents];
-        int nready = epoll_wait(epfd_, events, kMaxEvents, kEpollTimeoutMs);
+        EventPoller::Event events[kMaxEvents];
+        int nready = poller_.wait( events, kMaxEvents, kEpollTimeoutMs);
         if (nready < 0) {
             if (errno == EINTR) continue;
             LOG_ERROR("epoll_wait failed: %s", strerror(errno));
@@ -1055,8 +1027,8 @@ void TunnelClient::Run() {
         }
         bool broke = false;
         for (int i = 0; i < nready; ++i) {
-            int fd = events[i].data.fd;
-            if (events[i].events & (EPOLLERR | EPOLLHUP)) {
+            int fd = events[i].fd;
+            if (events[i].error()) {
                 if (fd == tunnel_fd_) {
                     LOG_WARN("epoll error/hup on tunnel");
                     Disconnect();
@@ -1075,15 +1047,15 @@ void TunnelClient::Run() {
                     sessions_.erase(it->second);
                     local_to_session_.erase(fd);
                 }
-                epoll_ctl(epfd_, EPOLL_CTL_DEL, fd, nullptr);
+                poller_.del(fd);
                 close(fd);
                 continue;
             }
             if (fd == tunnel_fd_) {
-                if (events[i].events & EPOLLIN) {
+                if (events[i].readable()) {
                     HandleTunnelReadable();
                 }
-                if (tunnel_fd_ >= 0 && (events[i].events & EPOLLOUT)) {
+                if (tunnel_fd_ >= 0 && (events[i].writable())) {
                     HandleTunnelWritable();
                 }
                 if (tunnel_fd_ < 0) {
@@ -1092,25 +1064,25 @@ void TunnelClient::Run() {
                 }
             } else {
                 if (fd == 0) {
-                    if (events[i].events & EPOLLIN) {
+                    if (events[i].readable()) {
                         HandleStdinReadable();
                     }
                 } else if (fd == tun_fd_) {
-                    if (events[i].events & EPOLLIN) {
+                    if (events[i].readable()) {
                         HandleTunReadable();
                     }
                 } else if (relay_listen_fds_.count(fd)) {
-                    if (events[i].events & EPOLLIN) {
+                    if (events[i].readable()) {
                         HandleLocalRelayAccept(fd);
                     }
                 } else if (fd == pending_relay_user_fd_) {
                     // 等待 relay ack 的 user_fd, 保持 pending 处理
-                    if (events[i].events & EPOLLIN) {
+                    if (events[i].readable()) {
                         HandleLocalRelayUserReadable(fd);
                     }
                 } else if (p2p_to_session_.count(fd)) {
                     // P2P socket 事件
-                    if (events[i].events & EPOLLOUT) {
+                    if (events[i].writable()) {
                         auto pit = p2p_to_session_.find(fd);
                         if (pit != p2p_to_session_.end()) {
                             auto sit = p2p_states_.find(pit->second);
@@ -1118,7 +1090,8 @@ void TunnelClient::Run() {
                             if (!sit->second.connected) {
                                 // 检查 TCP 握手是否完成
                                 int err = 0; socklen_t len = sizeof(err);
-                                getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len);
+                                getsockopt(fd, SOL_SOCKET, SO_ERROR,
+                                          reinterpret_cast<char*>(&err), &len);
                                 if (err == 0) {
                                     sit->second.connected = true;
                                     LOG_INFO("P2P connect ok fd=%d session=%u", fd, pit->second);
@@ -1132,7 +1105,7 @@ void TunnelClient::Run() {
                                                            .AppendU32(pit->second).Build();
                                     writer_.Append(std::move(fail));
                                     writer_.Flush(tunnel_fd_);
-                                    epoll_ctl(epfd_, EPOLL_CTL_DEL, fd, nullptr);
+                                    poller_.del(fd);
                                     close(fd);
                                     p2p_states_.erase(sit);
                                     p2p_to_session_.erase(pit);
@@ -1146,17 +1119,17 @@ void TunnelClient::Run() {
                             }
                         }
                     }
-                    if (events[i].events & EPOLLIN) {
+                    if (events[i].readable()) {
                         HandleP2pReadable(fd);
                     }
                 } else if (local_to_session_.count(fd)) {
                     // 本地中继用户连接上有数据
-                    if (events[i].events & EPOLLIN) {
+                    if (events[i].readable()) {
                         HandleLocalRelayUserReadable(fd);
                     }
                 } else {
                     // 普通 local_fd (端口映射模式)
-                    if (events[i].events & EPOLLIN) {
+                    if (events[i].readable()) {
                         HandleLocalReadable(fd);
                     }
                 }
@@ -1191,7 +1164,7 @@ void TunnelClient::Run() {
                                        .AppendU32(sid).Build();
                 writer_.Append(std::move(fail));
                 writer_.Flush(tunnel_fd_);
-                epoll_ctl(epfd_, EPOLL_CTL_DEL, it->second.p2p_fd, nullptr);
+                poller_.del(it->second.p2p_fd);
                 p2p_to_session_.erase(it->second.p2p_fd);
                 close(it->second.p2p_fd);
                 p2p_states_.erase(it);
@@ -1200,10 +1173,7 @@ void TunnelClient::Run() {
     }
 
     Disconnect();
-    if (epfd_ >= 0) {
-        close(epfd_);
-        epfd_ = -1;
-    }
+    poller_.close();
 }
 
 }  // namespace client

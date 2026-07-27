@@ -515,3 +515,57 @@ sudo systemctl enable --now tunnel_client
 journalctl -u tunnel_server -f
 journalctl -u tunnel_client -f
 ```
+
+## Windows / WSL2 使用说明
+
+Tunnel 暂不支持 Windows 原生编译，但可以通过 WSL2 无缝运行。
+
+### 1. 安装 WSL2
+
+```powershell
+# PowerShell（管理员）
+wsl --install -d Ubuntu-22.04
+```
+
+### 2. WSL2 内编译和运行
+
+与 Linux 完全一致：
+
+```bash
+sudo apt install build-essential cmake ninja-build libssl-dev
+git clone <repo> && cd http_proxy
+bash ninja_build.sh release
+
+# 以 client 身份运行（支持 TUN，需 sudo）
+sudo ./build/tunnel/tunnel_client <server_ip> 7000 -n my_wsl --tun
+```
+
+### 3. Windows 访问 TUN 组网内的其他机器
+
+TUN 创建的虚拟网络在 WSL2 内部，Windows 不能直接访问。通过以下方式在 Windows 操作：
+
+**方式 A：WSL2 的 SSH 本地端口转发**（不改任何代码）
+
+```bash
+# WSL2 内执行，将 Windows 的 10022 端口转发到 TUN 组网中的 10.0.0.3:22
+ssh -L 10022:10.0.0.3:22 user@10.0.0.2
+```
+
+```powershell
+# Windows 上：
+ssh -p 10022 user@127.0.0.1
+```
+
+**方式 B：端口映射（-L）直接暴露到公网**
+
+```bash
+# client_b 不开启 TUN，改用端口映射
+./tunnel_client <ip> 7000 -n client_b -L 22:10022
+```
+
+```powershell
+# Windows 直接连 server 公网端口
+ssh -p 10022 user@<server_ip>
+```
+
+> 方式 A 通过 WSL2 中转，方式 B 不经过 WSL2，Windows 和任意机器均可直接 SSH。

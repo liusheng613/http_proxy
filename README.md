@@ -24,6 +24,8 @@ bash ninja_build.sh release
 
 产物：`build/tunnel/tunnel_server`、`build/tunnel/tunnel_client`
 
+> **Windows 用户**：通过 WSL2 运行，环境与 Linux 完全一致。详见 [tunnel/README.md](tunnel/README.md) 末尾「Windows / WSL2」章节。
+
 ## Tunnel 快速开始
 
 ```bash
