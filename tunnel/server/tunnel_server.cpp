@@ -607,7 +607,7 @@ void TunnelServer::HandleFrame(int fd, const Frame& frame) {
                                               .Build();
                         tgt->second->writer.Append(std::move(pkt));
                         tgt->second->writer.Flush(tit->second);
-                        LOG_DEBUG("TUN_PACKET forwarded to fd=%d (dst=%u.%u.%u.%u)",
+                        LOG_INFO("TUN_PACKET forwarded to fd=%d (dst=%u.%u.%u.%u)",
                                  tit->second, (dst_ip>>24)&0xFF, (dst_ip>>16)&0xFF,
                                  (dst_ip>>8)&0xFF, dst_ip&0xFF);
                     }
