@@ -167,14 +167,14 @@ bool set_ip(const std::string& dev_name, const std::string& ip, int prefix) {
 
 bool add_route(const std::string& subnet, const std::string& dev_name) {
     char cmd[512];
-    // 注意: route add 在 Windows 上 if 编号不容易直接映射, 用 netsh 替代
-    // 或直接 route add, 但需要知道接口索引。
-    // 这里只添加路由到 "Tunnel" 网卡, 假设子网是 /24
+    // 用 netsh 绑定指定接口, metric=5 确保优先
     snprintf(cmd, sizeof(cmd),
-             "route add %s mask 255.255.255.0 0.0.0.0 >nul 2>&1",
-             subnet.c_str());
+             "netsh interface ipv4 add route %s/24 \"%s\" metric=5 >nul 2>&1",
+             subnet.c_str(), dev_name.c_str());
     if (system(cmd) != 0) {
-        LOG_WARN("route add failed (admin needed?): %s", cmd);
+        LOG_WARN("netsh add route failed (admin needed?): %s", cmd);
+    } else {
+        LOG_INFO("route added: %s/24 -> %s", subnet.c_str(), dev_name.c_str());
     }
     return true;
 }
