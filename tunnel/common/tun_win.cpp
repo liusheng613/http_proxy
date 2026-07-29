@@ -106,15 +106,19 @@ int create(const std::string& name_hint) {
     g_dev_name.clear();
     g_ok = false;
 
-    // 适配器名: Linux 用 "tun%d", Win 统一用 "Tunnel"
-    g_dev_name = "Tunnel";
+    // 适配器名: Linux 用 "tun%d" 模板, Windows 用友好名称
+    if (name_hint.empty() || name_hint == "tun%d") {
+        g_dev_name = "Tunnel VPN";
+    } else {
+        g_dev_name = name_hint;
+    }
     auto wide_name = to_wide(g_dev_name);
 
     // 先尝试打开已存在的适配器
     g_adapter = g_fnOpenAdapter(wide_name.c_str());
     if (!g_adapter) {
-        // 不存在则创建
-        g_adapter = g_fnCreateAdapter(wide_name.c_str(), L"Tunnel", nullptr);
+        // 不存在则创建 (TunnelType 影响 "描述" 字段显示)
+        g_adapter = g_fnCreateAdapter(wide_name.c_str(), L"Tunnel VPN Adapter", nullptr);
         if (!g_adapter) {
             LOG_ERROR("WintunCreateAdapter('%s') failed (err=%lu, run as admin?)",
                       g_dev_name.c_str(), GetLastError());
