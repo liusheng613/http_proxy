@@ -1090,6 +1090,9 @@ void TunnelClient::Run() {
                 } else if (fd == tun_fd_) {
                     if (events[i].readable()) {
                         HandleTunReadable();
+                    } else {
+                        LOG_INFO("TUN fd=%d event: readable=%d writable=%d err=%d",
+                                 fd, events[i].readable(), events[i].writable(), events[i].error());
                     }
                 } else if (relay_listen_fds_.count(fd)) {
                     if (events[i].readable()) {
