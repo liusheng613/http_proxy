@@ -45,20 +45,28 @@ bool TunnelClient::Connect() {
     if (tunnel_fd_ < 0) {
         return false;
     }
+#ifdef _WIN32
+    // On Windows we used blocking connect; set non-block now for event loop
     net::set_nonblock(tunnel_fd_);
+#endif
 
     if (!poller_.create()) {
         LOG_ERROR("event poller create failed");
         net::close_fd(tunnel_fd_);
         return false;
     }
-    if (!poller_.add(tunnel_fd_, EventPoller::READABLE | EventPoller::WRITABLE | EventPoller::ET_MODE)) {
+    uint32_t tunnel_events = EventPoller::READABLE | EventPoller::WRITABLE;
+#ifndef _WIN32
+    tunnel_events |= EventPoller::ET_MODE;
+#endif
+    if (!poller_.add(tunnel_fd_, tunnel_events)) {
         LOG_ERROR("poller add tunnel_fd failed");
         net::close_fd(tunnel_fd_);
         return false;
     }
 
-    connected_ = immediately;
+    // Always let HandleTunnelWritable trigger AUTH/REGISTER flow via SO_ERROR check
+    connected_ = false;
     time_t now = time(nullptr);
     last_recv_heartbeat_ = now;
     last_send_heartbeat_ = 0;
@@ -89,14 +97,20 @@ void TunnelClient::Disconnect() {
 
     // 关闭 TUN 设备
     if (tun_fd_ >= 0) {
+#ifdef _WIN32
+        tun::close();
+        tun_fd_ = -1;
+        tun_dev_name_.clear();
+#else
         if (!tun_dev_name_.empty()) {
             std::string cmd = "ip link del " + tun_dev_name_ + " 2>/dev/null";
             if (system(cmd.c_str()) != 0) {}  // ignore failure
         }
         poller_.del(tun_fd_);
-        close(tun_fd_);
+        ::close(tun_fd_);
         tun_fd_ = -1;
         tun_dev_name_.clear();
+#endif
     }
 
     // 清理 pending relay user fd
@@ -379,12 +393,11 @@ void TunnelClient::HandleFrame(const Frame& frame) {
             break;
 
         case MessageType::TUN_PACKET:
-#ifndef _WIN32
             if (tun_fd_ >= 0) {
-                if (write(tun_fd_, frame.payload.data(), frame.payload.size()) < 0) {
-                }
+                tun::write_packet(
+                    reinterpret_cast<const uint8_t*>(frame.payload.data()),
+                    static_cast<int>(frame.payload.size()));
             }
-#endif
             break;
 
         default:
@@ -852,7 +865,6 @@ void TunnelClient::SetupLocalRelayListeners() {
 }
 
 void TunnelClient::SetupTun() {
-#ifndef _WIN32
     if (!tun_enabled_ || tun_assigned_ip_.s_addr == 0) return;
     if (tun_fd_ >= 0) return;  // 已创建，重连后不重复创建
     tun_fd_ = tun::create("tun%d");
@@ -861,43 +873,42 @@ void TunnelClient::SetupTun() {
         tun_enabled_ = false;
         return;
     }
-    // 获取设备名
-    ifreq ifr{};
-    std::strncpy(ifr.ifr_name, "tun%d", IFNAMSIZ - 1);
-    ioctl(tun_fd_, TUNGETIFF, &ifr);
-    tun_dev_name_ = ifr.ifr_name;
+    tun_dev_name_ = tun::get_dev_name();
+#ifndef _WIN32
     net::set_nonblock(tun_fd_);
+#endif
 
-    // 配置 IP + 路由 (需要 root)
+    // 配置 IP + 路由 (需要管理员权限)
     std::string ip_str = inet_ntoa(tun_assigned_ip_);
     tun::set_ip(tun_dev_name_, ip_str, 24);
     tun::add_route("10.0.0.0/24", tun_dev_name_);
 
-        poller_.add(tun_fd_, EventPoller::READABLE | EventPoller::ET_MODE);
-    LOG_INFO("TUN ready: %s -> %s", tun_dev_name_.c_str(), ip_str.c_str());
+#ifdef _WIN32
+    // Windows: wintun 不是 socket, 不能用 poller_.add; 事件 HANDLE 单独处理
+#else
+    poller_.add(tun_fd_, EventPoller::READABLE | EventPoller::ET_MODE);
 #endif
+    LOG_INFO("TUN ready: %s -> %s", tun_dev_name_.c_str(), ip_str.c_str());
 }
 
 void TunnelClient::HandleTunReadable() {
-#ifndef _WIN32
     if (tun_fd_ < 0) return;
-    char buf[65536];
+    uint8_t buf[65536];
     for (;;) {
-        ssize_t n = read(tun_fd_, buf, sizeof(buf));
+        int n = tun::read_packet(buf, static_cast<int>(sizeof(buf)));
         if (n > 0) {
             std::string frame = FrameBuilder(MessageType::TUN_PACKET)
-                                    .AppendBytes(buf, static_cast<size_t>(n))
+                                    .AppendBytes(reinterpret_cast<const char*>(buf), static_cast<size_t>(n))
                                     .Build();
             writer_.Append(std::move(frame));
             writer_.Flush(tunnel_fd_);
             continue;
         }
-        if (errno == EAGAIN || errno == EWOULDBLOCK) break;
-        if (errno == EINTR) continue;
-        LOG_ERROR("read TUN fd failed: %s", strerror(errno));
+        if (n == 0) break;  // 没有更多数据
+        // n < 0: 错误
+        LOG_ERROR("read TUN failed");
         break;
     }
-#endif
 }
 
 void TunnelClient::HandleLocalRelayAccept(int listen_fd) {
@@ -1019,7 +1030,13 @@ void TunnelClient::Run() {
         }
 
         EventPoller::Event events[kMaxEvents];
-        int nready = poller_.wait( events, kMaxEvents, kEpollTimeoutMs);
+#ifdef _WIN32
+        // Windows: TUN 使用 wintun，短超时轮询配合 WaitForSingleObject
+        int poll_timeout = (tun_fd_ >= 0) ? 100 : kEpollTimeoutMs;
+#else
+        int poll_timeout = kEpollTimeoutMs;
+#endif
+        int nready = poller_.wait( events, kMaxEvents, poll_timeout);
         if (nready < 0) {
             if (errno == EINTR) continue;
             LOG_ERROR("epoll_wait failed: %s", strerror(errno));
@@ -1142,6 +1159,16 @@ void TunnelClient::Run() {
             need_backoff = true;
             continue;
         }
+
+#ifdef _WIN32
+        // 检查 wintun 是否有数据到达
+        if (tun_fd_ >= 0) {
+            HANDLE evt = static_cast<HANDLE>(tun::get_read_event());
+            if (evt && WaitForSingleObject(evt, 0) == WAIT_OBJECT_0) {
+                HandleTunReadable();
+            }
+        }
+#endif
 
         if (connected_) {
             time_t now = time(nullptr);

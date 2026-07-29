@@ -84,44 +84,47 @@ int create_listen_socket(uint16_t port, int tcp_backlog) {
     return fd;
 }
 
-int create_connect_socket(const std::string& ip, uint16_t port, bool* connected) {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) {
-        LOG_ERROR("socket() failed: %s", strerror(errno));
-        return -1;
-    }
-    set_nonblock(fd);
+	int create_connect_socket(const std::string& ip, uint16_t port, bool* connected) {
+	    int fd = socket(AF_INET, SOCK_STREAM, 0);
+	    if (fd < 0) {
+	        LOG_ERROR("socket() failed: %s", strerror(errno));
+	        return -1;
+	    }
 
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(port);
-    if (inet_pton(AF_INET, ip.c_str(), &addr.sin_addr) <= 0) {
-        LOG_ERROR("inet_pton(%s) failed", ip.c_str());
-        close(fd);
-        return -1;
-    }
+	#ifdef _WIN32
+	    // Windows: use blocking connect to avoid select/poll non-blocking issues
+	#else
+	    set_nonblock(fd);
+	#endif
 
-    int ret = connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
-    if (ret == 0) {
-        if (connected) *connected = true;
-        return fd;
-    }
-#ifdef _WIN32
-    if (WSAGetLastError() == WSAEWOULDBLOCK) {
-        if (connected) *connected = false;
-        return fd;
-    }
-    LOG_ERROR("connect(%s:%u) failed: WSA error %d", ip.c_str(), port, WSAGetLastError());
-#else
-    if (errno == EINPROGRESS) {
-        if (connected) *connected = false;
-        return fd;
-    }
-    LOG_ERROR("connect(%s:%u) failed: %s", ip.c_str(), port, strerror(errno));
-#endif
-    close_fd(fd);
-    return -1;
-}
+	    sockaddr_in addr{};
+	    addr.sin_family = AF_INET;
+	    addr.sin_port = htons(port);
+	    if (inet_pton(AF_INET, ip.c_str(), &addr.sin_addr) <= 0) {
+	        LOG_ERROR("inet_pton(%s) failed", ip.c_str());
+	        close_fd(fd);
+	        return -1;
+	    }
+
+	    int ret = connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+	    if (ret == 0) {
+	        if (connected) *connected = true;
+	        return fd;
+	    }
+	#ifdef _WIN32
+	    // On Windows blocking connect should not return error here normally,
+	    // but handle timeouts / unreachable hosts
+	    LOG_ERROR("connect(%s:%u) failed: WSA error %d", ip.c_str(), port, WSAGetLastError());
+	#else
+	    if (errno == EINPROGRESS) {
+	        if (connected) *connected = false;
+	        return fd;
+	    }
+	    LOG_ERROR("connect(%s:%u) failed: %s", ip.c_str(), port, strerror(errno));
+	#endif
+	    close_fd(fd);
+	    return -1;
+	}
 
 void close_fd(int& fd) {
     if (fd >= 0) {
