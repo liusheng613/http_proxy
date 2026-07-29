@@ -19,6 +19,14 @@
   inline int sock_close(int fd) { return closesocket(fd); }
   #define close_socket(fd) closesocket(fd)
 
+  // socket 读写 (Windows socket 不能用 POSIX read/write)
+  inline int sock_read(int fd, void* buf, int len) {
+      return recv(fd, static_cast<char*>(buf), len, 0);
+  }
+  inline int sock_write(int fd, const void* buf, int len) {
+      return send(fd, static_cast<const char*>(buf), len, 0);
+  }
+
   // sleep (ms)
   inline void platform_sleep_ms(int ms) { Sleep(ms); }
 
@@ -26,10 +34,17 @@
 
 #else
   // Linux / POSIX
+  #include <sys/types.h>
   #include <unistd.h>
   inline void platform_sleep_ms(int ms) { usleep(ms * 1000); }
   inline int sock_close(int fd) { return close(fd); }
   #define close_socket(fd) close(fd)
+  inline int sock_read(int fd, void* buf, int len) {
+      return static_cast<int>(read(fd, buf, len));
+  }
+  inline int sock_write(int fd, const void* buf, int len) {
+      return static_cast<int>(write(fd, buf, len));
+  }
 #endif
 
 #endif  // TUNNEL_COMMON_PLATFORM_H_

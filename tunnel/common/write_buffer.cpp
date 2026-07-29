@@ -2,6 +2,8 @@
 
 #ifndef _WIN32
   #include <sys/uio.h>
+#else
+  #include <winsock2.h>
 #endif
 #include <unistd.h>
 
@@ -27,11 +29,11 @@ bool WriteBuffer::Flush(int fd) {
         if (iovs.empty()) { queue_.clear(); return true; }
         ssize_t n = writev(fd, iovs.data(), static_cast<int>(iovs.size()));
 #else
-        // Windows: 拼接后单次 write
+        // Windows: 拼接后单次 send (socket 不能用 write)
         std::string combined;
         for (const auto& s : queue_) combined += s;
         if (combined.empty()) { queue_.clear(); return true; }
-        ssize_t n = write(fd, combined.data(), combined.size());
+        ssize_t n = send(fd, combined.data(), combined.size(), 0);
 #endif
         if (n < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) return false;

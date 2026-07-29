@@ -172,7 +172,7 @@ void TunnelClient::HandleTunnelWritable() {
 void TunnelClient::HandleTunnelReadable() {
     char buf[8192];
     for (;;) {
-        ssize_t n = read(tunnel_fd_, buf, sizeof(buf));
+        ssize_t n = sock_read(tunnel_fd_, buf, static_cast<int>(sizeof(buf)));
         if (n > 0) {
             if (!decoder_.Feed(buf, static_cast<size_t>(n))) {
                 LOG_WARN("protocol error from server, reconnecting");
