@@ -62,22 +62,22 @@ static bool load_wintun() {
         return false;
     }
 
-#define LOAD(nm) do { \
-    g_fn##nm = (WINTUN_##nm##_FUNC*)GetProcAddress(g_dll, "Wintun" #nm); \
-    if (!g_fn##nm) { LOG_ERROR("Wintun" #nm " not found"); return false; } \
+#define LOAD(fn, TYPE) do { \
+    g_fn##fn = (WINTUN_##TYPE##_FUNC*)GetProcAddress(g_dll, "Wintun" #fn); \
+    if (!g_fn##fn) { LOG_ERROR("Wintun" #fn " not found"); return false; } \
 } while(0)
 
-    LOAD(CreateAdapter);
-    LOAD(OpenAdapter);
-    LOAD(CloseAdapter);
-    LOAD(GetAdapterLUID);
-    LOAD(StartSession);
-    LOAD(EndSession);
-    LOAD(GetReadWaitEvent);
-    LOAD(ReceivePacket);
-    LOAD(ReleaseReceivePacket);
-    LOAD(AllocateSendPacket);
-    LOAD(SendPacket);
+    LOAD(CreateAdapter,        CREATE_ADAPTER);
+    LOAD(OpenAdapter,          OPEN_ADAPTER);
+    LOAD(CloseAdapter,         CLOSE_ADAPTER);
+    LOAD(GetAdapterLUID,       GET_ADAPTER_LUID);
+    LOAD(StartSession,         START_SESSION);
+    LOAD(EndSession,           END_SESSION);
+    LOAD(GetReadWaitEvent,     GET_READ_WAIT_EVENT);
+    LOAD(ReceivePacket,        RECEIVE_PACKET);
+    LOAD(ReleaseReceivePacket, RELEASE_RECEIVE_PACKET);
+    LOAD(AllocateSendPacket,   ALLOCATE_SEND_PACKET);
+    LOAD(SendPacket,           SEND_PACKET);
 #undef LOAD
 
     return true;
