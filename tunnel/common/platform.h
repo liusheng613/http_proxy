@@ -21,10 +21,19 @@
 
   // socket 读写 (Windows socket 不能用 POSIX read/write)
   inline int sock_read(int fd, void* buf, int len) {
-      return recv(fd, static_cast<char*>(buf), len, 0);
+      int n = recv(fd, static_cast<char*>(buf), len, 0);
+      // MinGW 的 recv 不设 errno, 手动处理 WSAEWOULDBLOCK
+      if (n < 0 && WSAGetLastError() == WSAEWOULDBLOCK) {
+          errno = EAGAIN;
+      }
+      return n;
   }
   inline int sock_write(int fd, const void* buf, int len) {
-      return send(fd, static_cast<const char*>(buf), len, 0);
+      int n = send(fd, static_cast<const char*>(buf), len, 0);
+      if (n < 0 && WSAGetLastError() == WSAEWOULDBLOCK) {
+          errno = EAGAIN;
+      }
+      return n;
   }
 
   // sleep (ms)
