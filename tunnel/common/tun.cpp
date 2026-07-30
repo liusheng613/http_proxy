@@ -29,7 +29,7 @@ int create(const std::string& name_hint) {
     char clean_cmd[128];
     for (int i = 0; i < 10; ++i) {
         snprintf(clean_cmd, sizeof(clean_cmd), "ip link del tun%d 2>/dev/null", i);
-        (void)system(clean_cmd);
+        if (system(clean_cmd) != 0) {}  // 设备不存在时删除失败, 忽略
     }
 
     g_fd = open("/dev/net/tun", O_RDWR);
