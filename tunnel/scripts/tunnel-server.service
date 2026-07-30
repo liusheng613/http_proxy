@@ -1,0 +1,16 @@
+[Unit]
+Description=Tunnel Server - VPN/Intranet Penetration
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/tunnel_server -c /etc/tunnel/server.conf
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tunnel-server
+
+[Install]
+WantedBy=multi-user.target

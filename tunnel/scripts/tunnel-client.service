@@ -1,0 +1,27 @@
+[Unit]
+Description=Tunnel Client - VPN/Intranet Penetration
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/tunnel_client -c /etc/tunnel/client.conf
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tunnel-client
+
+# 需要 CAP_NET_ADMIN 创建 TUN 设备
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
+
+# 安全加固
+NoNewPrivileges=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/dev/net/tun
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
