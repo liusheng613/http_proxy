@@ -181,7 +181,7 @@ bool add_route(const std::string& subnet, const std::string& dev_name) {
     if (system(cmd) != 0) {
         LOG_WARN("netsh add route failed (admin needed?): %s", cmd);
     } else {
-        LOG_INFO("route added: %s/24 -> %s", subnet.c_str(), dev_name.c_str());
+        LOG_INFO("route added: %s -> %s", subnet.c_str(), dev_name.c_str());
     }
     return true;
 }
