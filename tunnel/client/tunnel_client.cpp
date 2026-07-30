@@ -394,8 +394,6 @@ void TunnelClient::HandleFrame(const Frame& frame) {
 
         case MessageType::TUN_PACKET:
             if (tun_fd_ >= 0) {
-                LOG_INFO("TUN_PACKET from server, %zu bytes, writing to TUN",
-                         frame.payload.size());
                 tun::write_packet(
                     reinterpret_cast<const uint8_t*>(frame.payload.data()),
                     static_cast<int>(frame.payload.size()));
@@ -899,7 +897,6 @@ void TunnelClient::HandleTunReadable() {
     for (;;) {
         int n = tun::read_packet(buf, static_cast<int>(sizeof(buf)));
         if (n > 0) {
-            LOG_INFO("TUN read %d bytes, sending to server", n);
             std::string frame = FrameBuilder(MessageType::TUN_PACKET)
                                     .AppendBytes(reinterpret_cast<const char*>(buf), static_cast<size_t>(n))
                                     .Build();
@@ -1090,9 +1087,6 @@ void TunnelClient::Run() {
                 } else if (fd == tun_fd_) {
                     if (events[i].readable()) {
                         HandleTunReadable();
-                    } else {
-                        LOG_INFO("TUN fd=%d event: readable=%d writable=%d err=%d",
-                                 fd, events[i].readable(), events[i].writable(), events[i].error());
                     }
                 } else if (relay_listen_fds_.count(fd)) {
                     if (events[i].readable()) {

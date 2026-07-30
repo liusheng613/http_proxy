@@ -607,16 +607,10 @@ void TunnelServer::HandleFrame(int fd, const Frame& frame) {
                                               .Build();
                         tgt->second->writer.Append(std::move(pkt));
                         tgt->second->writer.Flush(tit->second);
-                        LOG_INFO("TUN_PACKET forwarded to fd=%d (dst=%u.%u.%u.%u)",
+                        LOG_DEBUG("TUN_PACKET forwarded to fd=%d (dst=%u.%u.%u.%u)",
                                  tit->second, (dst_ip>>24)&0xFF, (dst_ip>>16)&0xFF,
                                  (dst_ip>>8)&0xFF, dst_ip&0xFF);
                     }
-                } else {
-                    LOG_INFO("TUN_PACKET from fd=%d dst=%u.%u.%u.%u NOT forwarded (found=%d, same_fd=%d)",
-                             fd, (dst_ip>>24)&0xFF, (dst_ip>>16)&0xFF,
-                             (dst_ip>>8)&0xFF, dst_ip&0xFF,
-                             (int)(tit != ip_to_tunnel_.end()),
-                             (int)(tit != ip_to_tunnel_.end() ? tit->second : -1));
                 }
             }
             break;
