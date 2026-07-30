@@ -161,6 +161,12 @@ bool set_ip(const std::string& dev_name, const std::string& ip, int prefix) {
         // 不 fatal —— 用户可手动配
     } else {
         LOG_INFO("TUN %s: IP %s/%d configured", dev_name.c_str(), ip.c_str(), prefix);
+
+        // 提高跃点数，防止 Windows 后台流量走 TUN 网卡
+        snprintf(cmd, sizeof(cmd),
+                 "netsh interface ipv4 set interface \"%s\" metric=9999 >nul 2>&1",
+                 dev_name.c_str());
+        system(cmd);  // ignore failure
     }
     return true;
 }
