@@ -24,6 +24,14 @@ static std::string g_dev_name;
 
 int create(const std::string& name_hint) {
     g_dev_name.clear();
+
+    // 先清理可能残留的同名旧设备（上次非正常退出遗留）
+    char clean_cmd[128];
+    for (int i = 0; i < 10; ++i) {
+        snprintf(clean_cmd, sizeof(clean_cmd), "ip link del tun%d 2>/dev/null", i);
+        system(clean_cmd);
+    }
+
     g_fd = open("/dev/net/tun", O_RDWR);
     if (g_fd < 0) {
         LOG_ERROR("open /dev/net/tun failed: %s (need root/CAP_NET_ADMIN?)",
