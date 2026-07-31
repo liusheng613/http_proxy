@@ -100,9 +100,26 @@ int main(int argc, char** argv) {
     GetConsoleMode(hStdOut, &mode);
     SetConsoleMode(hStdOut, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
 
-    // 配置文件
-    const char* cfg = "tunnel_client.conf";
-    if (argc > 1) cfg = argv[1];
+    // 配置文件: 命令行指定 > 自动查找
+    std::string cfg;
+    if (argc > 1) {
+        cfg = argv[1];
+    } else {
+        const char* defaults[] = { "tunnel_client.conf", "../tunnel_client.conf" };
+        for (const char* p : defaults) {
+            if (GetFileAttributesA(p) != INVALID_FILE_ATTRIBUTES) { cfg = p; break; }
+        }
+    }
+    if (cfg.empty()) {
+        fprintf(stderr, "ERROR: config file not found\n");
+        fprintf(stderr, "  usage: tunnel_launcher.exe [config_file]\n");
+        return 1;
+    }
+
+    // 转成绝对路径，避免子进程工作目录不同导致找不到
+    char abs_cfg[MAX_PATH];
+    GetFullPathNameA(cfg.c_str(), MAX_PATH, abs_cfg, NULL);
+    cfg = abs_cfg;
 
     // 查找 tunnel_client.exe
     char self[MAX_PATH];
