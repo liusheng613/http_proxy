@@ -2,6 +2,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <string>
 
 #include "../common/config.h"
@@ -43,6 +44,21 @@ int main(int argc, char** argv) {
         int p = std::atoi(argv[i]);
         if (p <= 0 || p > 65535) { fprintf(stderr, "invalid port: %s\n", argv[i]); return 1; }
         control_port = static_cast<uint16_t>(p);
+    }
+
+    // 未指定 -c 时自动查找默认配置文件
+    if (config_file.empty()) {
+        const char* defaults[] = {
+            "/etc/tunnel/server.conf",
+            "tunnel_server.conf",
+            "../tunnel/server.conf",
+        };
+        std::ifstream f;
+        for (const char* p : defaults) {
+            f.open(p);
+            if (f.good()) { config_file = p; break; }
+            f.close();
+        }
     }
 
     // 加载配置文件 (命令行参数优先)

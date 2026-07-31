@@ -2,6 +2,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -157,6 +158,20 @@ int main(int argc, char** argv) {
             got_port = true;
         }
     }
+    // 未指定 -c 时自动查找默认配置文件
+    if (config_file.empty()) {
+        const char* defaults[] = {
+            "tunnel_client.conf",
+            "/etc/tunnel/client.conf",
+        };
+        std::ifstream f;
+        for (const char* p : defaults) {
+            f.open(p);
+            if (f.good()) { config_file = p; break; }
+            f.close();
+        }
+    }
+
     // 加载配置文件 (命令行参数优先)
     if (!config_file.empty()) {
         tunnel::Config cfg;
