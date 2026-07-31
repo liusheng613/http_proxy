@@ -162,6 +162,7 @@ void TunnelServer::CloseSession(int fd) {
     close(fd);
     sessions_.erase(it);
     LOG_INFO("tunnel fd=%d closed (sessions=%zu)", fd, sessions_.size());
+    BroadcastPeerList();
 }
 
 void TunnelServer::CloseUser(int user_fd) {
@@ -379,6 +380,7 @@ void TunnelServer::HandleFrame(int fd, const Frame& frame) {
                 }
                 sess.writer.Append(std::move(ack));
                 sess.writer.Flush(fd);
+                BroadcastPeerList();
             }
             break;
 
@@ -715,6 +717,43 @@ void TunnelServer::CheckHeartbeatTimeout() {
     for (int fd : dead) {
         LOG_WARN("tunnel fd=%d heartbeat timeout, closing", fd);
         CloseSession(fd);
+    }
+}
+
+void TunnelServer::BroadcastPeerList() {
+    // 收集所有有 TUN IP 的客户端
+    FrameBuilder builder(MessageType::PEER_LIST);
+    uint8_t count = 0;
+    size_t count_pos = builder.Build().size();  // 稍后回填
+
+    // 先用一个临时 buffer 收集
+    std::string temp;
+    for (auto& kv : ip_to_tunnel_) {
+        uint32_t ip = kv.first;
+        int fd = kv.second;
+        auto sit = sessions_.find(fd);
+        if (sit == sessions_.end() || sit->second->name.empty()) continue;
+        ++count;
+        uint32_t nip = htonl(ip);
+        temp.push_back(static_cast<char>(sit->second->name.size()));
+        temp += sit->second->name;
+        temp.append(reinterpret_cast<const char*>(&nip), 4);
+    }
+
+    std::string payload;
+    payload.push_back(static_cast<char>(count));
+    payload += temp;
+
+    std::string frame = FrameBuilder(MessageType::PEER_LIST)
+                            .AppendBytes(payload.data(), payload.size())
+                            .Build();
+
+    // 广播给所有已注册的客户端
+    for (auto& kv : sessions_) {
+        if (!kv.second->name.empty() && !auth_pending_.count(kv.first)) {
+            kv.second->writer.Append(frame);
+            kv.second->writer.Flush(kv.first);
+        }
     }
 }
 

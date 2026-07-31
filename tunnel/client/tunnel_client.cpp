@@ -400,6 +400,30 @@ void TunnelClient::HandleFrame(const Frame& frame) {
             }
             break;
 
+        case MessageType::PEER_LIST:
+            // 解析并写入文件, 供 GUI launcher 读取
+            if (frame.payload.size() >= 1) {
+                uint8_t count = static_cast<uint8_t>(frame.payload[0]);
+                size_t off = 1;
+                std::string out;
+                for (uint8_t i = 0; i < count && off + 1 < frame.payload.size(); ++i) {
+                    uint8_t nl = static_cast<uint8_t>(frame.payload[off]);
+                    if (off + 1 + nl + 4 > frame.payload.size()) break;
+                    std::string name = frame.payload.substr(off + 1, nl);
+                    uint32_t ip = ntohl(*reinterpret_cast<const uint32_t*>(
+                        &frame.payload[off + 1 + nl]));
+                    char ip_buf[32];
+                    snprintf(ip_buf, sizeof(ip_buf), "%u.%u.%u.%u",
+                             (ip>>24)&0xFF, (ip>>16)&0xFF, (ip>>8)&0xFF, ip&0xFF);
+                    out += std::string(ip_buf) + " " + name + "\n";
+                    off += 1 + nl + 4;
+                }
+                // Write to file
+                FILE* f = fopen("tunnel_peers.txt", "w");
+                if (f) { fputs(out.c_str(), f); fclose(f); }
+            }
+            break;
+
         default:
             LOG_INFO("recv %s (payload_len=%zu), not handled",
                      msg_type_str(frame.type), frame.payload.size());

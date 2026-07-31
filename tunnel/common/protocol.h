@@ -98,6 +98,10 @@ enum class MessageType : uint8_t {
     // TUN 虚拟网卡数据包: 携带原始 IP 包。server 根据 IP 头 dst 路由到目标 client。
     // payload: 完整原始 IP 包 (含 IP 头)
     TUN_PACKET = 0x10,
+
+    // 对等节点列表 (server -> client 广播)
+    // payload: { uint8 count; repeat(count) { uint8 name_len; char name[]; uint32 tun_ip; } }
+    PEER_LIST = 0x11,
 };
 
 inline const char* msg_type_str(MessageType t) {
@@ -118,6 +122,7 @@ inline const char* msg_type_str(MessageType t) {
         case MessageType::P2P_FAIL: return "P2P_FAIL";
         case MessageType::AUTH:     return "AUTH";
         case MessageType::TUN_PACKET: return "TUN_PACKET";
+        case MessageType::PEER_LIST:  return "PEER_LIST";
     }
     return "UNKNOWN";
 }

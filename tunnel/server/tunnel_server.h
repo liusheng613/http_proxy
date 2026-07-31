@@ -78,6 +78,9 @@ private:
 
     void CheckHeartbeatTimeout();
 
+    // 向所有已注册客户端广播当前 TUN 节点列表
+    void BroadcastPeerList();
+
     uint16_t control_port_;
     int      listen_fd_;
     int      epfd_;

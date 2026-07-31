@@ -12,6 +12,7 @@ static PROCESS_INFORMATION g_pi = {};
 static HWND g_hStatus = nullptr;
 static HWND g_hTunIp  = nullptr;
 static HWND g_hBtn    = nullptr;
+static HWND g_hPeers  = nullptr;
 static bool  g_running = false;
 static std::string g_cfg_path;
 
@@ -123,6 +124,17 @@ static void RefreshUI() {
     SetWindowTextW(g_hTunIp,  ip.empty() ? L"(waiting)" : ToWide(ip).c_str());
     SetWindowTextW(g_hBtn,    alive ? L"Stop" : L"Start");
     InvalidateRect(g_hStatus, nullptr, TRUE);
+
+    // Read peers from file
+    std::string peers;
+    FILE* f = fopen("tunnel_peers.txt", "r");
+    if (f) {
+        char buf[1024];
+        while (fgets(buf, sizeof(buf), f)) peers += buf;
+        fclose(f);
+    }
+    if (peers.empty()) peers = "(no peers)";
+    SetWindowTextW(g_hPeers, ToWide(peers).c_str());
 }
 
 // ---- window proc ----
@@ -158,7 +170,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         // Start/Stop button
         g_hBtn = CreateWindowW(L"BUTTON", L"Start",
                                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                               110, 170, 160, 40, hwnd, (HMENU)100, nullptr, nullptr);
+                               110, 170, 160, 35, hwnd, (HMENU)100, nullptr, nullptr);
+
+        // Peer list label
+        CreateWindowW(L"STATIC", L"Peers:", WS_CHILD | WS_VISIBLE,
+                      30, 225, 80, 20, hwnd, nullptr, nullptr, nullptr);
+        g_hPeers = CreateWindowW(L"STATIC", L"(no peers)",
+                                 WS_CHILD | WS_VISIBLE,
+                                 30, 245, 320, 80, hwnd, nullptr, nullptr, nullptr);
 
         // Timer for refresh
         SetTimer(hwnd, 1, 1000, nullptr);
@@ -229,7 +248,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
 
     HWND hwnd = CreateWindowW(L"TunnelLauncher", L"Tunnel Client",
                               WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-                              CW_USEDEFAULT, CW_USEDEFAULT, 400, 280,
+                              CW_USEDEFAULT, CW_USEDEFAULT, 400, 380,
                               nullptr, nullptr, hInst, nullptr);
 
     ShowWindow(hwnd, SW_SHOW);
