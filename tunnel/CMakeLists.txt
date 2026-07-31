@@ -50,4 +50,10 @@ if(WIN32)
             "$<TARGET_FILE_DIR:tunnel_client>/wintun.dll"
         COMMENT "Copying wintun.dll to output dir"
     )
+
+    # Windows 状态面板启动器
+    add_executable(tunnel_launcher
+        win_launcher/launcher.cpp
+    )
+    target_link_libraries(tunnel_launcher PRIVATE tunnel_common)
 endif()
