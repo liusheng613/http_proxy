@@ -51,10 +51,13 @@ if(WIN32)
         COMMENT "Copying wintun.dll to output dir"
     )
 
-    # Windows 状态面板启动器
-    add_executable(tunnel_launcher
+    # Windows 状态面板启动器 (WIN32 = GUI, 无控制台窗口)
+    add_executable(tunnel_launcher WIN32
         win_launcher/launcher.cpp
     )
     target_link_libraries(tunnel_launcher PRIVATE tunnel_common)
-    target_link_options(tunnel_launcher PRIVATE -static-libgcc -static-libstdc++ -mwindows)
+    if(MINGW)
+        set_target_properties(tunnel_launcher PROPERTIES
+            LINK_FLAGS "-static-libgcc -static-libstdc++")
+    endif()
 endif()
