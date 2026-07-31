@@ -81,7 +81,17 @@ static void StartTunnel() {
 
     std::string cmd = "\"" + exe + "\" -c \"" + g_cfg_path + "\"";
 
+    // 子进程日志重定向到文件, 便于排查
+    std::string logfile = dir + "tunnel_client.log";
+    HANDLE hLog = CreateFileA(logfile.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ,
+                              nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+
     STARTUPINFOA si = { sizeof(si) };
+    if (hLog != INVALID_HANDLE_VALUE) {
+        si.dwFlags = STARTF_USESTDHANDLES;
+        si.hStdOutput = hLog;
+        si.hStdError  = hLog;
+    }
     std::vector<char> cbuf(cmd.begin(), cmd.end());
     cbuf.push_back('\0');
 
@@ -91,6 +101,7 @@ static void StartTunnel() {
     } else {
         MessageBoxA(nullptr, cmd.c_str(), "启动 tunnel_client 失败", MB_OK | MB_ICONERROR);
     }
+    if (hLog != INVALID_HANDLE_VALUE) CloseHandle(hLog);
 }
 
 static void StopTunnel() {
