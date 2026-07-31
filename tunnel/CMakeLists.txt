@@ -56,15 +56,5 @@ if(WIN32)
         win_launcher/launcher.cpp
     )
     target_link_libraries(tunnel_launcher PRIVATE tunnel_common)
-    target_link_options(tunnel_launcher PRIVATE -static-libgcc -static-libstdc++)
-
-    # 拷贝运行所需的 DLL 到输出目录
-    foreach(dll libcrypto-3-x64.dll libssl-3-x64.dll)
-        add_custom_command(TARGET tunnel_launcher POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "$ENV{MSYSTEM_PREFIX}/bin/${dll}"
-                "$<TARGET_FILE_DIR:tunnel_launcher>/${dll}"
-            COMMENT "Copying ${dll} (may fail if not found, copy manually if needed)"
-        )
-    endforeach()
+    target_link_options(tunnel_launcher PRIVATE -static-libgcc -static-libstdc++ -mwindows)
 endif()
