@@ -164,7 +164,7 @@ int main(int argc, char** argv) {
     printf("  Starting: %s\n\n", cmd.c_str());
 
     if (!CreateProcessA(NULL, cbuf.data(), NULL, NULL, TRUE,
-                        CREATE_NO_WINDOW, NULL, dir.c_str(), &si, &pi)) {
+                        0, NULL, dir.c_str(), &si, &pi)) {
         fprintf(stderr, "CreateProcess failed: %lu\n  cmd: %s\n", GetLastError(), cmd.c_str());
         CloseHandle(hWrite);
         CloseHandle(g_hRead);
