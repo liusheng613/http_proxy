@@ -56,4 +56,5 @@ if(WIN32)
         win_launcher/launcher.cpp
     )
     target_link_libraries(tunnel_launcher PRIVATE tunnel_common)
+    target_link_options(tunnel_launcher PRIVATE -static)
 endif()
