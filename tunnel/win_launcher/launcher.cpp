@@ -85,6 +85,11 @@ static void StartTunnel() {
     std::string logfile = dir + "tunnel_client.log";
     HANDLE hLog = CreateFileA(logfile.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ,
                               nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hLog != INVALID_HANDLE_VALUE) {
+        std::string head = "\r\n===== launch: " + cmd + " (cwd=" + dir + ") =====\r\n";
+        DWORD w = 0;
+        WriteFile(hLog, head.data(), (DWORD)head.size(), &w, nullptr);
+    }
 
     STARTUPINFOA si = { sizeof(si) };
     if (hLog != INVALID_HANDLE_VALUE) {
