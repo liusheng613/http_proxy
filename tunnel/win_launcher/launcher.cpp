@@ -88,6 +88,8 @@ static void StartTunnel() {
     if (CreateProcessA(nullptr, cbuf.data(), nullptr, nullptr, FALSE,
                        0, nullptr, dir.c_str(), &si, &g_pi)) {
         g_running = true;
+    } else {
+        MessageBoxA(nullptr, cmd.c_str(), "启动 tunnel_client 失败", MB_OK | MB_ICONERROR);
     }
 }
 
@@ -223,6 +225,19 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
         char buf[MAX_PATH] = {};
         WideCharToMultiByte(CP_UTF8, 0, argv[1], -1, buf, MAX_PATH, nullptr, nullptr);
         g_cfg_path = buf;
+    } else {
+        // 未指定参数: 优先 exe 同目录的 tunnel_client.conf (双击运行时 cwd 不可靠)
+        char self[MAX_PATH];
+        GetModuleFileNameA(nullptr, self, MAX_PATH);
+        std::string dir(self);
+        size_t pos = dir.find_last_of("\\/");
+        if (pos != std::string::npos) dir = dir.substr(0, pos + 1);
+        std::string exe_dir_cfg = dir + "tunnel_client.conf";
+        if (GetFileAttributesA(exe_dir_cfg.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            g_cfg_path = exe_dir_cfg;
+        } else {
+            g_cfg_path = "tunnel_client.conf";  // 回退: 当前工作目录
+        }
     }
     LocalFree(argv);
 
