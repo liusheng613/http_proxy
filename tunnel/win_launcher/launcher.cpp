@@ -60,10 +60,8 @@ static bool IsAdmin() {
 static void RelaunchAsAdmin() {
     wchar_t self[MAX_PATH];
     GetModuleFileNameW(nullptr, self, MAX_PATH);
-    std::wstring args = L"\"";
-    args += self;
-    args += L"\" " + ToWide(g_cfg_path);
-    ShellExecuteW(nullptr, L"runas", self, args.c_str(), nullptr, SW_SHOW);
+    // 只传配置文件路径, 不要重复传自身路径
+    ShellExecuteW(nullptr, L"runas", self, ToWide(g_cfg_path).c_str(), nullptr, SW_SHOW);
 }
 
 // ---- tunnel control ----
