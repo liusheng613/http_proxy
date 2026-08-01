@@ -28,14 +28,7 @@ int main(int argc, char** argv) {
     winsock_init();
 #endif
 
-    if (argc < 2) {
-        fprintf(stderr,
-                "usage: %s <server_ip> [server_port] [-n name] [-L local:remote] [-R local:target:port] [-C target:port] [-d]\n"
-                "  example: %s 1.2.3.4 7000 -n client_a -L 22:10022 -R 10022:client_b:22 -d\n",
-                argv[0], argv[0]);
-        return 1;
-    }
-
+    // server_ip 检查放到配置文件加载之后
     std::string server_ip;
     uint16_t server_port = 7000;
     bool got_port = false;
