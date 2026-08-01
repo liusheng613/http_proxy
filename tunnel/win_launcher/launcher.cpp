@@ -13,11 +13,55 @@ static HWND g_hStatus = nullptr;
 static HWND g_hTunIp  = nullptr;
 static HWND g_hBtn    = nullptr;
 static HWND g_hPeers  = nullptr;
+static HWND g_hMainWnd = nullptr;
 static bool  g_running = false;
 static std::string g_cfg_path;
 static std::string g_peers_file;  // 绝对路径: exe 目录/tunnel_peers.txt
+static bool  g_tray_added = false;
+
+static const UINT TRAY_MSG = WM_APP + 1;
+static const UINT TRAY_ID  = 1;
+static const UINT MENU_SHOW = 1001;
+static const UINT MENU_EXIT = 1002;
 
 static HFONT g_hFont = nullptr;
+
+// ---- 托盘 ----
+static void TrayAdd(HWND hwnd) {
+    if (g_tray_added) return;
+    NOTIFYICONDATAW nid = {};
+    nid.cbSize = sizeof(nid);
+    nid.hWnd = hwnd;
+    nid.uID = TRAY_ID;
+    nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+    nid.uCallbackMessage = TRAY_MSG;
+    nid.hIcon = LoadIcon(nullptr, IDI_APPLICATION);
+    wcscpy_s(nid.szTip, L"Tunnel Client");
+    Shell_NotifyIconW(NIM_ADD, &nid);
+    g_tray_added = true;
+}
+
+static void TrayRemove() {
+    if (!g_tray_added) return;
+    NOTIFYICONDATAW nid = {};
+    nid.cbSize = sizeof(nid);
+    nid.hWnd = g_hMainWnd;
+    nid.uID = TRAY_ID;
+    Shell_NotifyIconW(NIM_DELETE, &nid);
+    g_tray_added = false;
+}
+
+static void ShowTrayMenu() {
+    HMENU menu = CreatePopupMenu();
+    AppendMenuW(menu, MF_STRING, MENU_SHOW, L"Show");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, MENU_EXIT, L"Exit");
+    POINT pt;
+    GetCursorPos(&pt);
+    SetForegroundWindow(g_hMainWnd);
+    TrackPopupMenu(menu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, g_hMainWnd, nullptr);
+    DestroyMenu(menu);
+}
 
 // ---- helpers ----
 static std::wstring ToWide(const std::string& s) {
@@ -201,6 +245,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         // Timer for refresh
         SetTimer(hwnd, 1, 1000, nullptr);
 
+        g_hMainWnd = hwnd;
+        TrayAdd(hwnd);
+
         // Auto-start
         StartTunnel();
         RefreshUI();
@@ -215,6 +262,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 StartTunnel();
             }
             RefreshUI();
+        } else if (LOWORD(wp) == MENU_SHOW) {
+            ShowWindow(hwnd, SW_SHOW);
+            SetForegroundWindow(hwnd);
+        } else if (LOWORD(wp) == MENU_EXIT) {
+            TrayRemove();
+            DestroyWindow(hwnd);  // 触发 WM_DESTROY -> PostQuitMessage
         }
         return 0;
 
@@ -222,7 +275,24 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (wp == 1) RefreshUI();
         return 0;
 
+    case TRAY_MSG:
+        if (wp == TRAY_ID) {
+            if (LOWORD(lp) == WM_LBUTTONDBLCLK) {
+                ShowWindow(hwnd, SW_SHOW);
+                SetForegroundWindow(hwnd);
+            } else if (LOWORD(lp) == WM_RBUTTONUP) {
+                ShowTrayMenu();
+            }
+        }
+        return 0;
+
+    case WM_CLOSE:
+        // 点 X 不退出, 隐藏到托盘
+        ShowWindow(hwnd, SW_HIDE);
+        return 0;
+
     case WM_DESTROY:
+        TrayRemove();
         StopTunnel();
         if (g_hFont) DeleteObject(g_hFont);
         PostQuitMessage(0);
