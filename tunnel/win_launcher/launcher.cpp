@@ -15,6 +15,7 @@ static HWND g_hBtn    = nullptr;
 static HWND g_hPeers  = nullptr;
 static bool  g_running = false;
 static std::string g_cfg_path;
+static std::string g_peers_file;  // 绝对路径: exe 目录/tunnel_peers.txt
 
 static HFONT g_hFont = nullptr;
 
@@ -99,7 +100,7 @@ static void StartTunnel() {
     cbuf.push_back('\0');
 
     if (CreateProcessA(nullptr, cbuf.data(), nullptr, nullptr, FALSE,
-                       0, nullptr, dir.c_str(), &si, &g_pi)) {
+                       CREATE_NO_WINDOW, nullptr, dir.c_str(), &si, &g_pi)) {
         g_running = true;
     } else {
         MessageBoxA(nullptr, cmd.c_str(), "启动 tunnel_client 失败", MB_OK | MB_ICONERROR);
@@ -141,13 +142,15 @@ static void RefreshUI() {
     SetWindowTextW(g_hBtn,    alive ? L"Stop" : L"Start");
     InvalidateRect(g_hStatus, nullptr, TRUE);
 
-    // Read peers from file
+    // Read peers from file (进程停止时不显示残留列表)
     std::string peers;
-    FILE* f = fopen("tunnel_peers.txt", "r");
-    if (f) {
-        char buf[1024];
-        while (fgets(buf, sizeof(buf), f)) peers += buf;
-        fclose(f);
+    if (alive) {
+        FILE* f = fopen(g_peers_file.c_str(), "r");
+        if (f) {
+            char buf[1024];
+            while (fgets(buf, sizeof(buf), f)) peers += buf;
+            fclose(f);
+        }
     }
     if (peers.empty()) peers = "(no peers)";
     SetWindowTextW(g_hPeers, ToWide(peers).c_str());
@@ -259,6 +262,16 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
     char abs[MAX_PATH];
     GetFullPathNameA(g_cfg_path.c_str(), MAX_PATH, abs, nullptr);
     g_cfg_path = abs;
+
+    // peers 文件固定用 exe 目录 (子进程 cwd = exe 目录, 写在那里)
+    {
+        char self[MAX_PATH];
+        GetModuleFileNameA(nullptr, self, MAX_PATH);
+        std::string dir(self);
+        size_t pos = dir.find_last_of("\\/");
+        if (pos != std::string::npos) dir = dir.substr(0, pos + 1);
+        g_peers_file = dir + "tunnel_peers.txt";
+    }
 
     // Must be admin
     if (!IsAdmin()) {
